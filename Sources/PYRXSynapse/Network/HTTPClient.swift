@@ -121,7 +121,23 @@ public final class HTTPClient: @unchecked Sendable {
         _ endpoint: Endpoint,
         body: Body
     ) async throws {
-        let request = try buildRequest(endpoint: endpoint, body: body)
+        let request = try buildRequest(path: endpoint.rawValue, body: body)
+        let (data, response) = try await perform(request)
+        try validate(response: response, data: data)
+    }
+
+    /// POST to an arbitrary path with an `Encodable` body and discard the
+    /// response body. Used for endpoints whose path carries a dynamic
+    /// component (e.g. `/v1/contacts/{external_id}/delete` for the GDPR
+    /// cascade in `PrivacyManager.deleteUser`).
+    ///
+    /// Internal — public surface is `Endpoint`-typed. Callers responsible
+    /// for URL-encoding any path segments they substitute in.
+    func postPath<Body: Encodable>(
+        _ path: String,
+        body: Body
+    ) async throws {
+        let request = try buildRequest(path: path, body: body)
         let (data, response) = try await perform(request)
         try validate(response: response, data: data)
     }
@@ -136,7 +152,15 @@ public final class HTTPClient: @unchecked Sendable {
         endpoint: Endpoint,
         body: Body
     ) throws -> URLRequest {
-        let url = config.baseUrl.appendingPathComponent(endpoint.rawValue)
+        try buildRequest(path: endpoint.rawValue, body: body)
+    }
+
+    /// Path-based overload — used by `postPath` for dynamic endpoints.
+    func buildRequest<Body: Encodable>(
+        path: String,
+        body: Body
+    ) throws -> URLRequest {
+        let url = config.baseUrl.appendingPathComponent(path)
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
 
