@@ -264,14 +264,17 @@ final class EventQueueTests: XCTestCase {
         let e4 = makeEvent(eventName: "e4")
         let e5 = makeEvent(eventName: "e5")
 
-        // Use enqueue but DON'T await drainNow — drain runs in background
-        // and will fail (no canned response). We only care about the in-
-        // memory + on-disk state after enqueue.
+        // enqueue triggers a background drain Task; every drain attempt
+        // here will fail (no canned response queued) and the drain loop
+        // will exit after exhausting its per-pass retry budget. We await
+        // drainNow to let that loop finish so the on-disk state is stable
+        // before we read it back.
         _ = try await queue.enqueue(e1)
         _ = try await queue.enqueue(e2)
         _ = try await queue.enqueue(e3)
         _ = try await queue.enqueue(e4)
         let countAfterFive = try await queue.enqueue(e5)
+        await queue.drainNow() // wait for background drain to settle
 
         XCTAssertEqual(countAfterFive, 3, "queue should clamp to maxQueueSize=3")
 
@@ -288,8 +291,13 @@ final class EventQueueTests: XCTestCase {
     func test_queue_persistedAcrossSDKRestart_drainsOnSecondInstance() async throws {
         let store = makeStore()
 
-        // First SDK instance: enqueue 3 events, no successful drain
-        // (mock session has no canned responses for the FIRST instance).
+        // First SDK instance: enqueue 3 events. The mock session has no
+        // canned responses — every drain attempt fails with a "no canned
+        // response queued" NSError (mapped to .retry in the queue), the
+        // drain loop exhausts its per-pass retry budget, and the events
+        // stay on disk. We await drainNow to ensure the background drain
+        // Task spawned by enqueue has fully settled before we inspect the
+        // file from the test thread.
         do {
             let session1 = MockHTTPSession()
             let q1 = EventQueue(
@@ -301,7 +309,7 @@ final class EventQueueTests: XCTestCase {
             _ = try await q1.enqueue(makeEvent(eventName: "persisted_1"))
             _ = try await q1.enqueue(makeEvent(eventName: "persisted_2"))
             _ = try await q1.enqueue(makeEvent(eventName: "persisted_3"))
-            // Do not drainNow — we want the events to remain on disk.
+            await q1.drainNow() // settle background drain
         }
 
         // Verify all three are on disk between SDK instances.
