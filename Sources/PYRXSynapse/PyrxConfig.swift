@@ -17,6 +17,16 @@ import Foundation
 public enum PyrxEnvironment: String, Sendable {
     case production
     case sandbox
+
+    /// Translate the SDK-facing environment selector into the wire-level
+    /// `environment` field accepted by identify / alias / devices request
+    /// bodies. ``production`` → `.live`, ``sandbox`` → `.test`.
+    var wireEnvironment: WireEnvironment {
+        switch self {
+        case .production: return .live
+        case .sandbox: return .test
+        }
+    }
 }
 
 /// Log verbosity for the SDK's internal `OSLog`-backed logger.

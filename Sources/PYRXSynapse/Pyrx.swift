@@ -11,8 +11,13 @@
 //    - `setLogLevel(_:)`     — adjust runtime verbosity
 //    - `debugInfo()`         — snapshot for diagnostics
 //
-//  Subsequent PRs (HTTP, identity, events, push, attribution) extend this
-//  actor in place rather than introducing new top-level types.
+//  PR 2 surface (Network + Identity):
+//    - `identify(externalId:traits:)` — anonymous → known merge
+//    - `alias(newExternalId:)`        — explicit anonymous → known merge
+//    - `logout()`                     — client-side identity clear
+//
+//  Subsequent PRs (events, push, attribution) extend this actor in place
+//  rather than introducing new top-level types.
 //
 
 import Foundation
@@ -28,13 +33,29 @@ public actor Pyrx {
     private let logger: PyrxLogger
     private var anonymousId: String?
 
+    /// Injectable transport — only the test path supplies a non-default value.
+    /// In production, `HTTPClient` is built with `URLSession.shared` once
+    /// `initialize(config:)` succeeds.
+    private let session: HTTPSession
+
+    /// Built during `initialize(config:)` from the validated config.
+    private var httpClient: HTTPClient?
+
+    /// Built during `initialize(config:)` once httpClient is ready.
+    private var identityManager: IdentityManager?
+
     // MARK: - Init
 
     /// Designated initializer — internal so the shared singleton is the only
     /// production path. Tests in `PYRXSynapseTests` can build a fresh actor
-    /// via `Pyrx.testInstance(storage:)` (see test helpers).
-    init(storage: PyrxStorage = KeychainStore(), logger: PyrxLogger = .shared) {
+    /// with an injected storage + HTTPSession.
+    init(
+        storage: PyrxStorage = KeychainStore(),
+        session: HTTPSession = URLSession.shared,
+        logger: PyrxLogger = .shared
+    ) {
         self.storage = storage
+        self.session = session
         self.logger = logger
     }
 
@@ -66,10 +87,69 @@ public actor Pyrx {
         self.config = config
         self.anonymousId = anon
 
+        // Build the network + identity layer NOW (not lazily) so the first
+        // call to identify() / track() / alias() pays no construction cost
+        // on the request path.
+        let client = HTTPClient(config: config, session: session)
+        self.httpClient = client
+        self.identityManager = IdentityManager(
+            storage: storage,
+            httpClient: client,
+            environment: config.environment.wireEnvironment,
+            logger: logger
+        )
+
         logger.info(
             "Initialized PYRXSynapse v\(PyrxConstants.sdkVersion) " +
             "(workspace=\(config.workspaceId), env=\(config.environment.rawValue))"
         )
+    }
+
+    // MARK: - Identity API (PR 2)
+
+    /// Identify an anonymous SDK session into a known contact.
+    ///
+    /// - Parameters:
+    ///   - externalId: canonical user identifier (e.g. your user id from
+    ///                 pyrx.auth, your CRM, or your DB).
+    ///   - traits:     optional contact attributes — shallow-merged into
+    ///                 `Contact.properties` server-side.
+    /// - Returns: the server's `IdentityResult` so callers can log which
+    ///            merge branch ran (debug menus, support investigations).
+    /// - Throws: `PyrxError.notInitialized` if `initialize(config:)` has not
+    ///           completed; `PyrxError.invalidConfig` for empty externalId;
+    ///           `PyrxError.network(...)` on transport / HTTP / decode failure.
+    @discardableResult
+    public func identify(
+        externalId: String,
+        traits: [String: JSONValue]? = nil
+    ) async throws -> IdentityResult {
+        guard let manager = identityManager else { throw PyrxError.notInitialized }
+        return try await manager.identify(externalId: externalId, traits: traits)
+    }
+
+    /// Explicitly merge an anonymous session into a known contact.
+    ///
+    /// Use when you have a separate user id you want to attach to all prior
+    /// anonymous activity (e.g., the user signs up — your backend mints a
+    /// permanent user id distinct from any device-local identifier).
+    @discardableResult
+    public func alias(newExternalId: String) async throws -> IdentityResult {
+        guard let manager = identityManager else { throw PyrxError.notInitialized }
+        return try await manager.alias(newExternalId: newExternalId)
+    }
+
+    /// Client-side identity clear. Does NOT call the server.
+    ///
+    /// After `logout()`:
+    ///   - `externalId` is removed from the Keychain.
+    ///   - `anonymousId` is preserved (subsequent events flow as
+    ///     `external_id = anonymousId`).
+    ///   - `deviceToken` is preserved (the device row remains valid; the
+    ///     server will re-attribute it to the next identify call).
+    public func logout() async throws {
+        guard let manager = identityManager else { throw PyrxError.notInitialized }
+        try await manager.logout()
     }
 
     /// Adjust the runtime log level. Safe to call before or after `initialize`.
