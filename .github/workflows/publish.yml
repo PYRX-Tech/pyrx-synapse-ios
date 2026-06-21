@@ -1,0 +1,65 @@
+name: Publish
+
+# Scaffolded but inactive until PR 7 (Phase 8.4a release).
+# Triggered on semver tags (e.g. v0.1.0, v1.0.0).
+# Gated on COCOAPODS_TRUNK_TOKEN secret being configured.
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  verify:
+    name: Verify build + SPM resolve + pod lib lint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15.4
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: SPM resolve
+        run: swift package resolve
+
+      - name: SPM build
+        run: swift build -c release
+
+      - name: SPM test
+        run: swift test
+
+      - name: pod lib lint
+        run: pod lib lint PYRXSynapse.podspec --allow-warnings
+
+  publish-cocoapods:
+    name: Publish to CocoaPods Trunk
+    needs: verify
+    runs-on: macos-14
+    # Gated on the COCOAPODS_TRUNK_TOKEN repository secret being configured.
+    # When unset, the job is skipped; PR 7 will enable this by adding the secret.
+    if: ${{ vars.COCOAPODS_PUBLISH_ENABLED == 'true' }}
+    env:
+      COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15.4
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: pod trunk push
+        run: pod trunk push PYRXSynapse.podspec --allow-warnings
+
+  github-release:
+    name: Attach SPM artifact to GitHub Release
+    needs: verify
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
