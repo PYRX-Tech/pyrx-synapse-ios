@@ -1,11 +1,14 @@
 Pod::Spec.new do |s|
   s.name             = 'PYRXSynapse'
   s.version          = '0.1.0'
-  s.summary          = 'PYRX Synapse iOS SDK — event tracking, identity, push notifications.'
+  s.summary          = 'PYRX Synapse iOS SDK — events, identity, push, privacy controls.'
   s.description      = <<-DESC
     Native iOS SDK for the PYRX Synapse customer engagement platform.
-    Provides event tracking, identity management, push notification
-    registration, and in-app messaging on iOS 14+.
+    Provides event tracking with a disk-backed offline queue, identity
+    management with anonymous-to-known merge, push notification
+    registration + delivery + cold-start attribution, GDPR-compliant
+    privacy controls, and diagnostics — all from a thread-safe Swift
+    actor on iOS 14+.
   DESC
 
   s.homepage         = 'https://synapse.pyrx.tech'
