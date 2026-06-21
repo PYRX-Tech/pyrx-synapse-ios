@@ -16,8 +16,12 @@
 //    - `alias(newExternalId:)`        — explicit anonymous → known merge
 //    - `logout()`                     — client-side identity clear
 //
-//  Subsequent PRs (events, push, attribution) extend this actor in place
-//  rather than introducing new top-level types.
+//  PR 3 surface (Events + Offline Queue):
+//    - `track(eventName:properties:)`  — custom event, enqueued + drained
+//    - `screen(screenName:properties:)` — `$screen` event with screen_name
+//
+//  Subsequent PRs (push, attribution) extend this actor in place rather
+//  than introducing new top-level types.
 //
 
 import Foundation
@@ -38,24 +42,53 @@ public actor Pyrx {
     /// `initialize(config:)` succeeds.
     private let session: HTTPSession
 
+    /// Optional override of the on-disk queue store. Production passes nil
+    /// (`EventQueue` builds a `FileSystemQueueStore` under `<Caches>`).
+    /// Tests inject an in-memory or temp-directory store so they never
+    /// touch the real Caches directory.
+    private let queueStoreOverride: QueueFileStore?
+
+    /// Optional override of the reachability source. Production passes nil
+    /// (`EventQueue` wires `NWPathReachability`). Tests pass a mock that
+    /// emits `.satisfied` on demand so drain triggers are deterministic.
+    private let reachabilityOverride: Reachability?
+
+    /// Optional override of the clock used by `EventQueue` for backoff
+    /// sleeps. Tests inject a no-op clock so retry sequences complete
+    /// instantly instead of pausing for 1+ seconds per attempt.
+    private let queueClockOverride: QueueClock?
+
     /// Built during `initialize(config:)` from the validated config.
     private var httpClient: HTTPClient?
 
     /// Built during `initialize(config:)` once httpClient is ready.
     private var identityManager: IdentityManager?
 
+    /// Built during `initialize(config:)` once httpClient + anonymousId are
+    /// ready. Owns the on-disk JSONL queue and retry loop.
+    private var eventQueue: EventQueue?
+
+    /// Built during `initialize(config:)` — surfaces `track` / `screen`.
+    private var eventsManager: EventsManager?
+
     // MARK: - Init
 
     /// Designated initializer — internal so the shared singleton is the only
     /// production path. Tests in `PYRXSynapseTests` can build a fresh actor
-    /// with an injected storage + HTTPSession.
+    /// with an injected storage + HTTPSession + queue dependencies.
     init(
         storage: PyrxStorage = KeychainStore(),
         session: HTTPSession = URLSession.shared,
+        queueStore: QueueFileStore? = nil,
+        reachability: Reachability? = nil,
+        queueClock: QueueClock? = nil,
         logger: PyrxLogger = .shared
     ) {
         self.storage = storage
         self.session = session
+        self.queueStoreOverride = queueStore
+        self.reachabilityOverride = reachability
+        self.queueClockOverride = queueClock
         self.logger = logger
     }
 
@@ -98,6 +131,49 @@ public actor Pyrx {
             environment: config.environment.wireEnvironment,
             logger: logger
         )
+
+        // Build the events queue + manager. The queue store either comes
+        // from the test override or resolves to `<Caches>/com.pyrx.synapse/
+        // event_queue.jsonl` (failure to resolve falls back to disabling
+        // persistence — events go to a transient in-memory file URL so the
+        // SDK still functions, but offline durability is lost).
+        let store: QueueFileStore
+        if let override = queueStoreOverride {
+            store = override
+        } else {
+            do {
+                store = try FileSystemQueueStore()
+            } catch {
+                logger.error("EventQueue: cannot resolve Caches dir — \(error). Offline durability disabled.")
+                // Best-effort fallback: write to a tmp file that lives for
+                // this process. Avoids crashing the SDK; the queue still
+                // works in-memory + retries until the process ends.
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("com.pyrx.synapse.fallback")
+                    .appendingPathComponent("event_queue.jsonl")
+                store = FileSystemQueueStore(fileURL: tmp)
+            }
+        }
+
+        let queue = EventQueue(
+            httpClient: client,
+            store: store,
+            maxQueueSize: config.maxQueueSize,
+            logger: logger,
+            clock: queueClockOverride ?? SystemClock()
+        )
+        self.eventQueue = queue
+        self.eventsManager = EventsManager(
+            queue: queue,
+            storage: storage,
+            anonymousId: anon,
+            logger: logger
+        )
+
+        // Wire reachability and drain pre-existing events on launch.
+        let reachability: Reachability = reachabilityOverride ?? NWPathReachability()
+        await queue.bindReachability(reachability)
+        await queue.drainNow()
 
         logger.info(
             "Initialized PYRXSynapse v\(PyrxConstants.sdkVersion) " +
@@ -152,9 +228,72 @@ public actor Pyrx {
         try await manager.logout()
     }
 
+    // MARK: - Events API (PR 3)
+
+    /// Track a custom event.
+    ///
+    /// Persists to the disk-backed offline queue and triggers a non-blocking
+    /// drain attempt. Returns once the event is durably on disk — the actual
+    /// network call happens asynchronously and is retried with exponential
+    /// backoff on transport / 5xx errors. HTTP 4xx responses cause the
+    /// event to be DROPPED with a warning log (no infinite retry of bad
+    /// events).
+    ///
+    /// `external_id` resolution: uses the externalId set by `identify()` if
+    /// present, otherwise the SDK's `anonymousId`. Always at least one is
+    /// present once `initialize(config:)` has completed.
+    ///
+    /// - Parameters:
+    ///   - eventName: caller-defined event name (e.g. `"order_placed"`).
+    ///                Must not be empty / whitespace-only.
+    ///   - properties: optional event attributes. Forwarded onto the wire
+    ///                 `attributes` field; the backend stores them on
+    ///                 `events.attributes` (jsonb) verbatim.
+    /// - Throws: `PyrxError.notInitialized` if `initialize(config:)` has not
+    ///           completed; `PyrxError.invalidConfig` for empty event name.
+    public func track(
+        eventName: String,
+        properties: [String: JSONValue]? = nil
+    ) async throws {
+        guard let manager = eventsManager else { throw PyrxError.notInitialized }
+        try await manager.track(eventName: eventName, properties: properties)
+    }
+
+    /// Track a screen view.
+    ///
+    /// Wire shape: `event_name = "$screen"` with `attributes.screen_name =
+    /// screenName`. Caller `properties` are merged into the same
+    /// attributes bag (caller values cannot overwrite the SDK-stamped
+    /// `screen_name`). Same queue + retry semantics as `track`.
+    ///
+    /// - Parameters:
+    ///   - screenName: the screen the user is viewing
+    ///                 (e.g. `"home"`, `"cart"`, `"product_detail"`).
+    ///                 Must not be empty / whitespace-only.
+    ///   - properties: optional additional attributes (e.g. product_id,
+    ///                 referrer screen).
+    public func screen(
+        screenName: String,
+        properties: [String: JSONValue]? = nil
+    ) async throws {
+        guard let manager = eventsManager else { throw PyrxError.notInitialized }
+        try await manager.screen(screenName: screenName, properties: properties)
+    }
+
     /// Adjust the runtime log level. Safe to call before or after `initialize`.
     public func setLogLevel(_ level: LogLevel) {
         logger.setLevel(level)
+    }
+
+    /// Test-only: await any in-flight queue drain. Production callers do
+    /// not need this — `track` / `screen` return as soon as the event is
+    /// durably on disk, and the drain proceeds asynchronously. Tests use
+    /// this to wait for the drain Task spawned by `enqueue` so they can
+    /// deterministically inspect the mock session's recorded requests.
+    ///
+    /// Internal scope (not part of the public API surface).
+    func testAwaitQueueDrain() async {
+        await eventQueue?.drainNow()
     }
 
     /// Snapshot of the SDK's internal state. Useful for debug menus and
