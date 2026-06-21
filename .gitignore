@@ -1,0 +1,55 @@
+# ── Swift Package Manager ────────────────────────────────────────────────────
+.build/
+.swiftpm/
+Package.resolved
+
+# ── Xcode ────────────────────────────────────────────────────────────────────
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+DerivedData/
+build/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode user-specific
+*.xcscheme.plist
+project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# ── CocoaPods ────────────────────────────────────────────────────────────────
+Pods/
+*.xcworkspace/contents.xcworkspacedata
+# Note: do NOT ignore Podfile.lock in apps; libraries may.
+
+# ── Carthage ─────────────────────────────────────────────────────────────────
+Carthage/Build/
+Carthage/Checkouts/
+
+# ── fastlane ─────────────────────────────────────────────────────────────────
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# ── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Editors ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.log
+.env
+.env.*
+!.env.example
