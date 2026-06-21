@@ -59,6 +59,14 @@ public struct PyrxConfig: Sendable, Equatable {
     /// Log verbosity. Defaults to `.info`.
     public let logLevel: LogLevel
 
+    /// Maximum number of events the offline queue retains on disk before
+    /// evicting the OLDEST to make room (FIFO eviction). Defaults to
+    /// 1000 — chosen as a balance between resilience to extended offline
+    /// stretches and the disk pressure a misbehaving app could create.
+    ///
+    /// Must be ≥ 1. Values < 1 are clamped silently inside `EventQueue`.
+    public let maxQueueSize: Int
+
     public static let defaultBaseUrl: URL = {
         // Force-unwrap is safe — the literal is a valid URL.
         guard let url = URL(string: "https://synapse-events.pyrx.tech") else {
@@ -72,13 +80,15 @@ public struct PyrxConfig: Sendable, Equatable {
         apiKey: String,
         environment: PyrxEnvironment = .production,
         baseUrl: URL = PyrxConfig.defaultBaseUrl,
-        logLevel: LogLevel = .info
+        logLevel: LogLevel = .info,
+        maxQueueSize: Int = 1000
     ) {
         self.workspaceId = workspaceId
         self.apiKey = apiKey
         self.environment = environment
         self.baseUrl = baseUrl
         self.logLevel = logLevel
+        self.maxQueueSize = maxQueueSize
     }
 
     /// Throws `PyrxError.invalidConfig` if any required field fails validation.
