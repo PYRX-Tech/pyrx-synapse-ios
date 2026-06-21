@@ -5,14 +5,11 @@
 [![iOS](https://img.shields.io/badge/iOS-14.0%2B-blue.svg)](https://developer.apple.com/ios/)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange.svg)](https://swift.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![CI](https://github.com/PYRX-Tech/pyrx-synapse-ios/actions/workflows/ci.yml/badge.svg)](https://github.com/PYRX-Tech/pyrx-synapse-ios/actions/workflows/ci.yml)
 
 Native iOS SDK for the [PYRX Synapse](https://synapse.pyrx.tech) customer engagement platform.
 
-> **Status**: Phase 8.4a foundation (PR 1 of 7). This release ships the
-> project scaffold, the core `Pyrx` actor, and the Keychain storage layer.
-> Event tracking, identity, push, and in-app messaging land in subsequent
-> PRs. See [DEVELOPMENT_PLAN.md](https://github.com/PYRX-Tech/pyrx.synapse/blob/master/DEVELOPMENT_PLAN.md)
-> §8.4a.
+Track events, identify users, register for push notifications, and respect user privacy — all from a single thread-safe `actor` API designed for SwiftUI and UIKit apps on iOS 14+.
 
 ## Installation
 
@@ -28,7 +25,7 @@ Or add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/PYRX-Tech/pyrx-synapse-ios.git", from: "0.1.0"),
+    .package(url: "https://github.com/PYRX-Tech/pyrx-synapse-ios.git", from: "1.0.0"),
 ],
 targets: [
     .target(
@@ -42,8 +39,16 @@ targets: [
 
 ### CocoaPods
 
+Add to your `Podfile`:
+
 ```ruby
-pod 'PYRXSynapse', '~> 0.1'
+pod 'PYRXSynapse', '~> 1.0'
+```
+
+Then run:
+
+```bash
+pod install
 ```
 
 ## Quick Start
@@ -51,19 +56,19 @@ pod 'PYRXSynapse', '~> 0.1'
 ```swift
 import PYRXSynapse
 
-// In your AppDelegate / @main entry point:
 @main
 struct MyApp: App {
     init() {
         Task {
             try await Pyrx.shared.initialize(
                 config: PyrxConfig(
-                    workspaceId: UUID(uuidString: "...")!,
-                    apiKey: "psk_live_YOUR_API_KEY",
-                    environment: .production,
-                    logLevel: .info
+                    workspaceId: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
+                    apiKey: "psk_live_YOUR_API_KEY"
                 )
             )
+            try await Pyrx.shared.identify(externalId: "user_123")
+            try await Pyrx.shared.track(eventName: "app_opened")
+            _ = await Pyrx.shared.requestPushPermission()
         }
     }
 
@@ -73,19 +78,29 @@ struct MyApp: App {
 }
 ```
 
+The APNs device token is delivered through `UIApplicationDelegate`. See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full AppDelegate adapter pattern and [docs/PUSH_SETUP.md](docs/PUSH_SETUP.md) for end-to-end push provisioning.
+
 ## Features
 
-- **Foundation** (this release):
-  - `Pyrx` actor: thread-safe singleton with `initialize(config:)`
-  - `PyrxConfig`: workspaceId, apiKey, environment, baseUrl, logLevel
-  - `KeychainStore`: identity persistence (anonymousId / externalId / deviceToken)
-- **Coming in subsequent PRs**:
-  - HTTP client + identity API (`identify`, `alias`, `reset`)
-  - Event tracking + offline queue (`track`, `flush`)
-  - Push notifications (`registerForPush`, `handleRemoteNotification`)
-  - Attribution + privacy (`setIDFA`, `optOut`)
-  - Diagnostics + debug tooling
-  - SwiftUI sample app
+- **Identity** — `identify`, `alias`, `logout` with anonymous-to-known merge, server-side event/device re-attribution, and Keychain-backed identifier persistence.
+- **Events** — `track` and `screen` with a durable on-disk JSONL offline queue, exponential-backoff retry on 5xx/transport failures, FIFO eviction at the configured cap (1000 default), drop-on-4xx semantics.
+- **Push notifications** — permission request, APNs token registration to `/v1/devices`, foreground presentation, background silent delivery, tap/action/dismiss telemetry, cold-start attribution, deep-link routing.
+- **Privacy controls** — tracking kill switch (`setTrackingEnabled`), GDPR cascade delete (`deleteUser`), App Tracking Transparency status readout.
+- **Diagnostics** — `debugInfo()` snapshot with SDK version, queue depth, last drain timestamp, device-token fingerprint (never the full token), and configuration echo for support cases.
+- **Thread safety** — public surface is a Swift `actor`. Call from any task on any thread.
+
+## Documentation
+
+| Guide | Purpose |
+|-------|---------|
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Five-minute setup walkthrough — Xcode → SDK → identify → track → push |
+| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | Every public type and method, with usage examples |
+| [docs/PUSH_SETUP.md](docs/PUSH_SETUP.md) | Apple Developer Program → APNs Auth Key → PYRX dashboard → app capability |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Migration notes between SDK versions |
+| [docs/RELEASING.md](docs/RELEASING.md) | Release process for SDK maintainers |
+| [CHANGELOG.md](CHANGELOG.md) | Per-version release notes |
+
+Full developer portal: [synapse.pyrx.tech/developers/sdks/ios](https://synapse.pyrx.tech/developers/sdks/ios).
 
 ## Requirements
 
@@ -95,9 +110,22 @@ struct MyApp: App {
 | Swift  | 5.9     |
 | Xcode  | 15.0    |
 
-## Documentation
+## Sample app
 
-Full API reference and integration guides: [synapse.pyrx.tech/developers/sdks/ios](https://synapse.pyrx.tech/developers/sdks/ios) (published with PR 7).
+A complete SwiftUI sample app lives at [`Examples/SwiftUIDemo`](Examples/SwiftUIDemo) — every public SDK surface (identify, events, push, privacy, debug) is wired into a tab UI you can run on a Simulator or real device.
+
+```bash
+cd Examples/SwiftUIDemo
+open SwiftUIDemo.xcodeproj
+```
+
+Set `PYRX_WORKSPACE_ID` and `PYRX_API_KEY` in the Xcode scheme's environment variables to point at your own workspace.
+
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome on [GitHub](https://github.com/PYRX-Tech/pyrx-synapse-ios).
+
+For substantial changes, open an issue first so we can align on direction. Every PR is gated on `swift test`, `swiftlint --strict`, and `pod lib lint`.
 
 ## License
 
