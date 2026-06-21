@@ -1,0 +1,70 @@
+name: SwiftUIDemo
+options:
+  bundleIdPrefix: tech.pyrx.synapse
+  deploymentTarget:
+    iOS: "15.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    CODE_SIGN_STYLE: Automatic
+    # Allow `xcodebuild build -destination 'generic/platform=iOS Simulator'`
+    # without a paid Apple Developer Team in CI / unsigned local builds.
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: ""
+    PROVISIONING_PROFILE_SPECIFIER: ""
+    ENABLE_BITCODE: NO
+    GENERATE_INFOPLIST_FILE: NO
+packages:
+  PYRXSynapse:
+    # Local path to the SDK at the repo root. Xcode resolves SPM packages
+    # relative to the workspace, so this stays valid when the demo is
+    # opened standalone via `Examples/SwiftUIDemo/SwiftUIDemo.xcodeproj`.
+    path: "../.."
+schemes:
+  SwiftUIDemo:
+    build:
+      targets:
+        SwiftUIDemo: all
+targets:
+  SwiftUIDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: SwiftUIDemo
+        excludes:
+          - "Info.plist"
+          - "SwiftUIDemo.entitlements"
+    resources: []
+    info:
+      path: SwiftUIDemo/Info.plist
+      properties:
+        CFBundleDisplayName: PYRX Synapse Demo
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIBackgroundModes:
+          - remote-notification
+    entitlements:
+      path: SwiftUIDemo/SwiftUIDemo.entitlements
+      properties:
+        aps-environment: development
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tech.pyrx.synapse.swiftuidemo
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: SwiftUIDemo/Info.plist
+        CODE_SIGN_ENTITLEMENTS: SwiftUIDemo/SwiftUIDemo.entitlements
+    dependencies:
+      - package: PYRXSynapse
+        product: PYRXSynapse

@@ -163,10 +163,20 @@ final class PushHandlers: @unchecked Sendable {
     func foregroundPresentationOptions(
         for notification: UNNotification
     ) -> UNNotificationPresentationOptions {
+        foregroundPresentationOptions(
+            userInfo: notification.request.content.userInfo
+        )
+    }
+
+    /// Pure-data variant for tests. Same observable behaviour as the
+    /// `UNNotification` overload but doesn't require a real notification
+    /// object (which has no public initialiser).
+    func foregroundPresentationOptions(
+        userInfo: [AnyHashable: Any]
+    ) -> UNNotificationPresentationOptions {
         // Track `$push_received` for foreground deliveries too — otherwise
         // analytics under-counts campaigns that fire while users have the
         // app open.
-        let userInfo = notification.request.content.userInfo
         Task { [weak self] in
             await self?.recordPushReceived(userInfo: userInfo)
         }
@@ -224,7 +234,18 @@ final class PushHandlers: @unchecked Sendable {
         // doesn't leave the OS waiting.
         let userInfo = response.notification.request.content.userInfo
         let actionId = response.actionIdentifier
+        await dispatchResponse(userInfo: userInfo, actionId: actionId)
+        completion()
+    }
 
+    /// Pure-data dispatch that does the same work as `handleResponse` minus
+    /// the `UNNotificationResponse` unwrap. Pulled out so the test target
+    /// can exercise every action-id branch without instantiating a real
+    /// `UNNotificationResponse` (which has no public initialiser).
+    func dispatchResponse(
+        userInfo: [AnyHashable: Any],
+        actionId: String
+    ) async {
         switch actionId {
         case UNNotificationDefaultActionIdentifier:
             // Body tap → push_opened + deep-link.
@@ -243,8 +264,6 @@ final class PushHandlers: @unchecked Sendable {
             // fall back to the default `deep_link`.
             await routeDeepLink(userInfo: userInfo, overrideKey: "\(actionId)_url")
         }
-
-        completion()
     }
 
     // MARK: - Cold-start attribution (PR 5)
