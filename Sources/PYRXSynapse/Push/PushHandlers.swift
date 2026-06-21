@@ -247,6 +247,48 @@ final class PushHandlers: @unchecked Sendable {
         completion()
     }
 
+    // MARK: - Cold-start attribution (PR 5)
+
+    /// Emit `$app_opened_from_push` for a payload pulled from
+    /// `application(_:didFinishLaunchingWithOptions:)`'s
+    /// `launchOptions[.remoteNotification]` slot.
+    ///
+    /// Wire shape mirrors `$push_received`:
+    ///   - event_name: `"$app_opened_from_push"`
+    ///   - attributes: `pyrx_attrs` block + `push_log_id` + (if present)
+    ///                 `deep_link` so downstream analytics can join on
+    ///                 push_log_id and re-derive the click target.
+    ///
+    /// No-op if the payload doesn't carry `pyrx.push_log_id` — legacy /
+    /// cross-vendor pushes pass through silently so analytics doesn't
+    /// over-count app opens.
+    ///
+    /// Internal (called by `Pyrx.recordColdStartLaunch` and the deferred
+    /// replay in `initialize`).
+    func recordColdStartOpen(userInfo: [AnyHashable: Any]) async {
+        guard pushLogId(from: userInfo) != nil else {
+            logger.debug("recordColdStartOpen: no pyrx.push_log_id — skipping $app_opened_from_push.")
+            return
+        }
+        var attrs = pyrxAttributes(from: userInfo) ?? [:]
+        // Annotate the deep link onto the attribution event so downstream
+        // analytics can re-derive the click target without re-parsing
+        // the original APNs payload.
+        if let pyrxBlock = userInfo[PayloadKey.pyrxNamespace] as? [String: Any],
+           let deepLink = pyrxBlock[PayloadKey.deepLink] as? String {
+            attrs["deep_link"] = .string(deepLink)
+        }
+        do {
+            try await eventsManager.track(
+                eventName: "$app_opened_from_push",
+                properties: attrs.isEmpty ? nil : attrs
+            )
+            logger.info("recordColdStartOpen: $app_opened_from_push enqueued.")
+        } catch {
+            logger.warning("recordColdStartOpen: track failed — \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Telemetry
 
     /// Fire `$push_received` through the events queue (offline-durable,

@@ -99,6 +99,24 @@ public actor Pyrx {
     /// response delegate plumbing + `/v1/push/{opened,click}` telemetry. (PR 4)
     private var pushHandlers: PushHandlers?
 
+    /// Built during `initialize(config:)` — owns the privacy kill switch
+    /// (`setTrackingEnabled`) + GDPR delete cascade + ATT awareness. (PR 5)
+    private var privacyManager: PrivacyManager?
+
+    /// Pending `launchOptions[.remoteNotification]` payload — captured by
+    /// `recordColdStartLaunch(_:)` and consumed by `initialize(config:)`.
+    /// Lets apps invoke the cold-start hook BEFORE the SDK is ready
+    /// (typical AppDelegate ordering — `application(_:didFinishLaunching:)`
+    /// happens before any business code calls `Pyrx.shared.initialize`)
+    /// without dropping the attribution.
+    private var pendingColdStartPayload: [AnyHashable: Any]?
+
+    /// Pending `setTrackingEnabled` value — captured before `initialize`
+    /// completes and applied as soon as `privacyManager` exists. Lets
+    /// apps express a "respect prior opt-out before any drain" intent
+    /// without racing against initialize.
+    private var pendingTrackingEnabled: Bool?
+
     // MARK: - Push seam overrides (test-only)
 
     /// Test override of the UN authorization requester + UIApplication
@@ -182,23 +200,7 @@ public actor Pyrx {
         // event_queue.jsonl` (failure to resolve falls back to disabling
         // persistence — events go to a transient in-memory file URL so the
         // SDK still functions, but offline durability is lost).
-        let store: QueueFileStore
-        if let override = queueStoreOverride {
-            store = override
-        } else {
-            do {
-                store = try FileSystemQueueStore()
-            } catch {
-                logger.error("EventQueue: cannot resolve Caches dir — \(error). Offline durability disabled.")
-                // Best-effort fallback: write to a tmp file that lives for
-                // this process. Avoids crashing the SDK; the queue still
-                // works in-memory + retries until the process ends.
-                let tmp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("com.pyrx.synapse.fallback")
-                    .appendingPathComponent("event_queue.jsonl")
-                store = FileSystemQueueStore(fileURL: tmp)
-            }
-        }
+        let store: QueueFileStore = resolveQueueStore()
 
         let queue = EventQueue(
             httpClient: client,
@@ -232,10 +234,41 @@ public actor Pyrx {
             logger: logger
         )
 
+        // PR 5 — privacy manager. Owns the kill switch, GDPR delete, ATT
+        // status. Construction is cheap (no I/O); only `setTrackingEnabled`
+        // / `deleteUser` do work.
+        let privacy = PrivacyManager(
+            storage: storage,
+            queue: queue,
+            httpClient: client,
+            logger: logger
+        )
+        self.privacyManager = privacy
+
+        // Apply any pre-init tracking gate choice BEFORE the first drain
+        // — otherwise a user who flipped opt-out before init would see
+        // pre-existing events drain anyway on cold start.
+        if let pending = pendingTrackingEnabled {
+            pendingTrackingEnabled = nil
+            await privacy.setTrackingEnabled(pending)
+            logger.info("Applied pre-init tracking gate: enabled=\(pending)")
+        }
+
         // Wire reachability and drain pre-existing events on launch.
         let reachability: Reachability = reachabilityOverride ?? NWPathReachability()
         await queue.bindReachability(reachability)
         await queue.drainNow()
+
+        // PR 5 — cold-start attribution. If the host called
+        // `recordColdStartLaunch(launchOptions:)` from
+        // `application(_:didFinishLaunching:)` BEFORE we initialised,
+        // the push payload sits in `pendingColdStartPayload`. Process it
+        // now so we can emit `$app_opened_from_push` through the now-
+        // wired EventsManager.
+        if let pending = pendingColdStartPayload {
+            pendingColdStartPayload = nil
+            await pushHandlers?.recordColdStartOpen(userInfo: pending)
+        }
 
         logger.info(
             "Initialized PYRXSynapse v\(PyrxConstants.sdkVersion) " +
@@ -486,6 +519,105 @@ public actor Pyrx {
         await handlers.handleResponse(response, completion: completion)
     }
 
+    // MARK: - Privacy API (PR 5)
+
+    /// Toggle the SDK's tracking kill switch.
+    ///
+    /// When `enabled == false`:
+    ///   - `track` / `screen` / push handlers still ENQUEUE events to the
+    ///     on-disk queue (so flipping back to enabled doesn't lose intent
+    ///     captured during the opt-out window).
+    ///   - The drain loop refuses to send anything until the user
+    ///     re-enables tracking. The next `setTrackingEnabled(true)` kicks
+    ///     a drain automatically so buffered events flush as soon as
+    ///     consent returns.
+    ///
+    /// When `enabled == true` (the default):
+    ///   - Normal behaviour — every enqueue triggers a drain attempt.
+    ///
+    /// The flag is NOT persisted across launches. Apps that want a sticky
+    /// opt-out should restore the value from their own preferences store
+    /// on launch and call this method before any tracking calls.
+    ///
+    /// Safe to call before `initialize(config:)` — the value is captured
+    /// and applied as soon as the privacy manager exists.
+    public func setTrackingEnabled(_ enabled: Bool) async {
+        if let manager = privacyManager {
+            await manager.setTrackingEnabled(enabled)
+        } else {
+            // Pre-init — buffer the choice. Apply during `initialize`
+            // once the privacy manager exists. See
+            // `pendingTrackingEnabled` below.
+            pendingTrackingEnabled = enabled
+            logger.debug("setTrackingEnabled(\(enabled)) called before initialize — buffered.")
+        }
+    }
+
+    /// GDPR right-to-erasure cascade.
+    ///
+    /// Order of operations:
+    ///   1. Resolve the active external_id (or anonymous fallback).
+    ///   2. Wipe the Keychain (anonymousId + externalId + deviceToken).
+    ///   3. Wipe the on-disk event queue (drop every pending event).
+    ///   4. POST `/v1/contacts/{external_id}/delete` to ask the backend
+    ///      to cascade — IF we had an identifier. Anonymous-only sessions
+    ///      (no track call ever drained, no identify) skip step 4
+    ///      because the backend has nothing to cascade.
+    ///
+    /// **Local wipe happens BEFORE the backend call** — if the backend
+    /// fails, the on-device data is still gone. Callers should treat a
+    /// thrown error as "couldn't reach the server, please retry that part"
+    /// rather than "the wipe didn't happen".
+    ///
+    /// 4xx responses from the backend are swallowed (treated as
+    /// "already deleted") so the user-facing semantic — "your data is
+    /// gone" — stays consistent.
+    ///
+    /// - Throws: `PyrxError.notInitialized` if `initialize(config:)` has
+    ///   not completed; `PyrxError.network(...)` for 5xx / transport
+    ///   failure on the backend cascade.
+    public func deleteUser() async throws {
+        guard let manager = privacyManager else { throw PyrxError.notInitialized }
+        try await manager.deleteUser()
+    }
+
+    // MARK: - Cold-start attribution (PR 5)
+
+    /// Capture the launch-options payload from
+    /// `application(_:didFinishLaunchingWithOptions:)`. If the app was
+    /// cold-launched via a push tap, the OS hands us the original payload
+    /// here. We use it to emit a `$app_opened_from_push` event that
+    /// downstream analytics joins against the campaign that fired the push.
+    ///
+    /// Safe to call BEFORE `initialize(config:)` — the payload is buffered
+    /// and replayed once the SDK is fully wired (typical AppDelegate
+    /// ordering puts `application(_:didFinishLaunching:)` ahead of any
+    /// business code that initialises the SDK).
+    ///
+    /// Pass `nil` (or omit the key) when the app wasn't cold-launched
+    /// from a push — the method becomes a no-op.
+    ///
+    /// Host AppDelegate:
+    ///
+    ///     func application(
+    ///         _ app: UIApplication,
+    ///         didFinishLaunchingWithOptions opts: [UIApplication.LaunchOptionsKey: Any]?
+    ///     ) -> Bool {
+    ///         let push = opts?[.remoteNotification] as? [AnyHashable: Any]
+    ///         Task { await Pyrx.shared.recordColdStartLaunch(userInfo: push) }
+    ///         return true
+    ///     }
+    public func recordColdStartLaunch(userInfo: [AnyHashable: Any]?) async {
+        guard let userInfo, !userInfo.isEmpty else { return }
+        if let handlers = pushHandlers {
+            await handlers.recordColdStartOpen(userInfo: userInfo)
+        } else {
+            // Pre-init — stash for replay during initialize().
+            pendingColdStartPayload = userInfo
+            logger.debug("recordColdStartLaunch before initialize — payload buffered.")
+        }
+    }
+
     /// Adjust the runtime log level. Safe to call before or after `initialize`.
     public func setLogLevel(_ level: LogLevel) {
         logger.setLevel(level)
@@ -504,24 +636,96 @@ public actor Pyrx {
 
     /// Snapshot of the SDK's internal state. Useful for debug menus and
     /// support bundles.
-    public func debugInfo() -> PyrxDebugInfo {
+    ///
+    /// PR 5 (Phase 8.4a Task 8.4a.11) — additional fields:
+    ///   - `environment` / `baseUrl` — config echo.
+    ///   - `deviceTokenFingerprint` — last-8-char view (never the full token).
+    ///   - `trackingEnabled` — privacy kill switch state.
+    ///   - `attStatus` — App Tracking Transparency authorisation (read-only).
+    ///   - `eventQueueDepth` — pending offline-queue count.
+    ///   - `lastDrainAt` — wall-clock timestamp of the most recent drain
+    ///     attempt (any outcome).
+    ///
+    /// Becomes `async` to consult the actor-isolated `EventQueue` for
+    /// queue depth + last drain timestamp. Pre-init callers still get
+    /// useful state (sdkVersion, platform, ATT status — none of which
+    /// require the SDK to be initialised).
+    public func debugInfo() async -> PyrxDebugInfo {
         // `try?` already returns Optional<Optional<String>>.flatten == Optional<String>,
         // so no `?? nil` is needed.
         let externalId = try? storage.get(.externalId)
         let deviceToken = try? storage.get(.deviceToken)
+
+        // Privacy + queue surfaces — gracefully degrade pre-init.
+        let trackingEnabled = await privacyManager?.trackingEnabled ?? true
+        let attStatus = privacyManager?.attAuthorizationStatus() ?? Self.attAuthorizationStatusFallback()
+        let queueDepth = await eventQueue?.debugQueueDepth() ?? 0
+        let lastDrainAt = await eventQueue?.debugLastDrainAt()
+
         return PyrxDebugInfo(
             sdkVersion: PyrxConstants.sdkVersion,
             platform: PyrxConstants.platform,
             initialized: config != nil,
             workspaceId: config?.workspaceId,
+            environment: config?.environment.rawValue,
+            baseUrl: config?.baseUrl.absoluteString,
             logLevel: logger.level,
             anonymousId: anonymousId,
             hasExternalId: externalId != nil,
-            hasDeviceToken: deviceToken != nil
+            hasDeviceToken: deviceToken != nil,
+            deviceTokenFingerprint: PyrxDebugInfo.fingerprint(forDeviceToken: deviceToken),
+            trackingEnabled: trackingEnabled,
+            attStatus: attStatus,
+            eventQueueDepth: queueDepth,
+            lastDrainAt: lastDrainAt
         )
     }
 
+    /// Fallback ATT lookup for the pre-init case — `PrivacyManager` owns
+    /// the canonical reader once it exists, but a debug snapshot before
+    /// initialisation should still report the right value rather than
+    /// silently returning `.notDetermined`.
+    private static func attAuthorizationStatusFallback() -> PyrxATTStatus {
+        // Build a throwaway PrivacyManager-style read by constructing a
+        // minimal one. Cheaper: replicate the body of
+        // `attAuthorizationStatus` inline. Replicated so the pre-init
+        // path stays dependency-free.
+        #if canImport(AppTrackingTransparency)
+        if #available(iOS 14.0, tvOS 14.0, macOS 11.0, *) {
+            // Re-use PrivacyManager's nonisolated reader through a
+            // stand-in instance. This avoids duplicating the framework
+            // version-guard logic.
+            return PrivacyManager.staticATTStatus()
+        }
+        return .unavailable
+        #else
+        return .unavailable
+        #endif
+    }
+
     // MARK: - Private
+
+    /// Pick the queue store backing — test override if supplied, else the
+    /// production `<Caches>/com.pyrx.synapse/event_queue.jsonl`. Extracted
+    /// so `initialize(config:)` body length stays under the SwiftLint
+    /// function-body-length ceiling.
+    private func resolveQueueStore() -> QueueFileStore {
+        if let override = queueStoreOverride {
+            return override
+        }
+        do {
+            return try FileSystemQueueStore()
+        } catch {
+            logger.error("EventQueue: cannot resolve Caches dir — \(error). Offline durability disabled.")
+            // Best-effort fallback: write to a tmp file that lives for
+            // this process. Avoids crashing the SDK; the queue still
+            // works in-memory + retries until the process ends.
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("com.pyrx.synapse.fallback")
+                .appendingPathComponent("event_queue.jsonl")
+            return FileSystemQueueStore(fileURL: tmp)
+        }
+    }
 
     /// Returns the persisted anonymousId, generating + persisting a fresh
     /// UUIDv4 if none exists. Mirrors the browser SDK pattern in

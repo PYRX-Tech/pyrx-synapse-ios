@@ -176,6 +176,18 @@ actor EventQueue {
     /// Exponential-backoff retry counter. Reset to 0 on success.
     private var consecutiveFailures = 0
 
+    /// Privacy gate (Phase 8.4a Task 8.4a.10). When `false`, `enqueue`
+    /// still appends + persists so the SDK preserves intent through a
+    /// disable→re-enable cycle, but the drain loop refuses to send.
+    /// Toggled by `PrivacyManager.setTrackingEnabled(_:)`.
+    private var trackingEnabled: Bool = true
+
+    /// Wall-clock timestamp of the most recent drain pass — surfaced via
+    /// `PyrxDebugInfo.lastDrainAt`. Updated on entry to `drainLoop` so
+    /// even a "skipped because tracking disabled" pass leaves a trace
+    /// (otherwise debug menus would look frozen during opt-out windows).
+    private var lastDrainAt: Date?
+
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -281,6 +293,50 @@ actor EventQueue {
     /// to disk. Exposed via `internal` for test target visibility.
     var count: Int { events.count }
 
+    /// Snapshot of the in-memory queue depth for diagnostics. Same value
+    /// as `count` but the spelling matches the public `PyrxDebugInfo`
+    /// field (`eventQueueDepth`) so the call site reads naturally.
+    /// Loads from disk on the first call so a debug-info snapshot
+    /// requested before any explicit drain/enqueue still reflects
+    /// persisted state.
+    func debugQueueDepth() async -> Int {
+        try? await loadIfNeeded()
+        return events.count
+    }
+
+    /// Snapshot of the most-recent drain timestamp for diagnostics.
+    /// Returns `nil` until the queue has attempted to flush at least once.
+    func debugLastDrainAt() -> Date? {
+        lastDrainAt
+    }
+
+    /// Read the privacy gate. Used by diagnostics — `PrivacyManager` holds
+    /// its own copy as the source of truth, but the queue's copy is what
+    /// the drain loop actually consults, so we expose it for parity.
+    func debugTrackingEnabled() -> Bool {
+        trackingEnabled
+    }
+
+    /// Flip the privacy kill switch. When `enabled == false`:
+    ///   - The drain loop refuses to send anything (returns immediately).
+    ///   - `enqueue` still persists events so they flush on re-enable.
+    ///
+    /// Idempotent — setting the same value twice is a no-op.
+    func setTrackingEnabled(_ enabled: Bool) {
+        trackingEnabled = enabled
+    }
+
+    /// GDPR cascade — drop every persisted event without sending. Called
+    /// by `PrivacyManager.deleteUser`. Idempotent; safe to call on an
+    /// already-empty queue.
+    func wipe() async {
+        try? await loadIfNeeded()
+        events.removeAll()
+        consecutiveFailures = 0
+        try? persist()
+        logger.info("EventQueue: wiped on privacy request.")
+    }
+
     // MARK: - Private — drain loop
 
     private func startDrainIfIdle() {
@@ -310,6 +366,19 @@ actor EventQueue {
     ///                        either continue this pass (within retry budget)
     ///                        or exit and let the next trigger pick up
     private func drainLoop() async {
+        // Stamp every drain entry — even a no-op pass — so diagnostics
+        // can show the SDK is alive and the gating decision is fresh.
+        lastDrainAt = Date()
+
+        // Privacy gate (Phase 8.4a Task 8.4a.10). When tracking is disabled
+        // we still hold queued events on disk — but we refuse to send them
+        // until the user re-opts-in. `PrivacyManager.setTrackingEnabled(true)`
+        // explicitly calls `drainNow()` to kick this loop back into life.
+        guard trackingEnabled else {
+            logger.debug("EventQueue: drain skipped — tracking disabled (\(events.count) buffered).")
+            return
+        }
+
         var iterations = 0
         var retriesThisPass = 0
 
