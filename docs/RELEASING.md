@@ -14,9 +14,17 @@ Both are driven by `.github/workflows/publish.yml`, triggered on push of any `v*
 
 These items must be in place before the very first release. They do not need to be repeated for subsequent releases unless something rotates.
 
-### Apple Developer Program membership
+### Apple Developer Program membership — NOT required for SDK publishing
 
-Required for the GitHub Actions runners to build against the full iOS SDK in `pod lib lint`. US$99/yr. Enrol at [developer.apple.com/programs](https://developer.apple.com/programs/).
+An earlier draft of this doc said Apple Developer Program is required for `pod lib lint`. That was **incorrect**. `pod lib lint` and `pod trunk push` validate the podspec against the iOS SDK that ships inside Xcode itself — no Apple Developer membership needed. SPM publishing requires nothing beyond pushing a git tag (consumers resolve directly via GitHub).
+
+Apple Developer Program (US$99/yr at [developer.apple.com/programs](https://developer.apple.com/programs/)) is required only for:
+
+- Building the sample app at `Examples/SwiftUIDemo/` for **real-device push testing** (Phase 8.4 exit criterion: install SDK in sample app via SPM → push from PYRX dashboard lands on real iPhone → opens attribute back)
+- Generating APNs `.p8` keys for test sends (separate from publishing; configured per-workspace in the PYRX dashboard)
+- App Store distribution (irrelevant for an SDK library)
+
+**Skip Apple Developer Program for the SDK publish flow.** Set it up later when you're ready for the exit-criterion device test.
 
 ### CocoaPods Trunk account
 
@@ -34,13 +42,16 @@ pod trunk me
 
 …to confirm you're authenticated. Copy the **token** value — you'll add it to GitHub as a secret next.
 
-### GitHub repository secret
+### GitHub secret
 
-Add the trunk token to `PYRX-Tech/pyrx-synapse-ios` repository settings:
+Add the trunk token as a GitHub secret. **Recommended:** add at PYRX-Tech org level scoped to `pyrx-synapse-ios` (matches the org-secret pattern established for the Android SDK's Sonatype credentials — keeps cross-repo provisioning consistent).
 
-1. GitHub → Settings → Secrets and variables → Actions → New repository secret.
-2. Name: `COCOAPODS_TRUNK_TOKEN`. Value: the token from `pod trunk me`.
-3. Also create a repository **variable** named `COCOAPODS_PUBLISH_ENABLED` with value `true` (the publish job is gated on this flag so accidentally-pushed tags don't publish during early testing).
+1. GitHub Org settings → Secrets and variables → Actions → New organization secret → Repository access: select `pyrx-synapse-ios` (and future iOS SDK repos as they're added).
+2. Name: `COCOAPODS_TRUNK_TOKEN`. Value: the token from `pod trunk me` output (look for the `Token: <hex>` line).
+
+**Alternative:** add as a `PYRX-Tech/pyrx-synapse-ios` repository secret if you prefer per-repo scoping.
+
+A repository **variable** named `COCOAPODS_PUBLISH_ENABLED=true` is already set on this repo (the publish job is gated on this flag so accidentally-pushed tags don't publish during early testing). No action needed.
 
 ### Push permission for the `PYRXSynapse` pod
 
