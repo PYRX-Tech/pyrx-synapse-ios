@@ -1,0 +1,39 @@
+//
+// Config.xcconfig — SwiftUIDemo build-time configuration for the
+// PYRX Synapse iOS SDK sample app.
+//
+// Default values point at production with placeholder credentials. They
+// let the app boot (config validation passes) but every event POST will
+// be rejected by the backend until you swap in real values.
+//
+// Override pattern
+// ----------------
+// Copy Config.local.xcconfig.template → Config.local.xcconfig (gitignored)
+// and fill in your dev environment values. The optional `#include?` at
+// the bottom of this file pulls those overrides in; xcconfig uses
+// later-wins semantics so anything in Config.local.xcconfig wins.
+//
+// URL gotcha
+// ----------
+// `//` is the xcconfig comment start marker. URLs that contain `//` must
+// escape with `$()` between the slashes:
+//     PYRX_BASE_URL = https:/$()/synapse-events.pyrx.tech
+// expands to the literal `https://synapse-events.pyrx.tech` at build time.
+//
+
+// Default: zero UUID. Replace via Config.local.xcconfig (recommended) or
+// via PYRX_WORKSPACE_ID env var in the scheme settings (laptop dev only).
+PYRX_WORKSPACE_ID = 00000000-0000-0000-0000-000000000000
+
+// Default: zero-key placeholder. Format matches `psk_{env}_{32-hex}` so
+// PyrxConfig validation passes; backend rejects every wire call until
+// you supply a real key from /settings/api-keys.
+PYRX_API_KEY = psk_live_00000000000000000000000000000000
+
+// Default: production. Override to point at staging or a Cloudflare-Tunnel-
+// exposed local dev box (e.g. https:/$()/dev.synapse-events.pyrx.tech).
+PYRX_BASE_URL = https:/$()/synapse-events.pyrx.tech
+
+// Optional local override (gitignored). Question-mark form is silent when
+// the file doesn't exist, so the default build keeps working out of the box.
+#include? "Config.local.xcconfig"

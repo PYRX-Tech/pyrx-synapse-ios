@@ -53,3 +53,9 @@ fastlane/test_output
 .env
 .env.*
 !.env.example
+
+# ── Sample-app local config ──────────────────────────────────────────────────
+# Per-developer overrides for SwiftUIDemo's PYRX_* build settings. The
+# template (Config.local.xcconfig.template) IS committed for reference;
+# the actual .local.xcconfig is gitignored so real credentials stay local.
+Examples/SwiftUIDemo/Config.local.xcconfig
