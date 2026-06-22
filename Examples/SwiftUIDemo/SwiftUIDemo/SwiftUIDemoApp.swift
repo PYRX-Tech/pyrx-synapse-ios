@@ -49,7 +49,7 @@ struct SwiftUIDemoApp: App {
                         workspaceId: SwiftUIDemoApp.workspaceId,
                         apiKey: SwiftUIDemoApp.apiKey,
                         environment: .production,
-                        baseUrl: URL(string: "https://synapse-events.pyrx.tech")!
+                        baseUrl: SwiftUIDemoApp.baseUrl
                     )
                 )
             } catch {
@@ -67,26 +67,54 @@ struct SwiftUIDemoApp: App {
         }
     }
 
-    // MARK: - Placeholder config (override in scheme env vars for a real run)
+    // MARK: - Config resolution chain
+    //
+    // Each value is resolved in priority order:
+    //   1. ProcessInfo env var — set in the scheme's "Run → Arguments →
+    //      Environment Variables" for laptop dev. Highest priority. Does
+    //      NOT propagate to TestFlight / sideloaded builds (Xcode-only).
+    //   2. Info.plist key — baked at build time from Config.xcconfig
+    //      (production defaults) + Config.local.xcconfig (gitignored
+    //      dev overrides). Survives TestFlight / sideloaded builds.
+    //   3. Hardcoded fallback — never useful in practice; here so the
+    //      app boots even with a broken xcconfig.
+    //
+    // See Examples/SwiftUIDemo/Config.xcconfig + Config.local.xcconfig.template
+    // for the override pattern.
 
-    /// Replace with your real workspace UUID before running against a live
-    /// PYRX deployment. Reads from `PYRX_WORKSPACE_ID` env var when set.
     static var workspaceId: UUID {
         if let raw = ProcessInfo.processInfo.environment["PYRX_WORKSPACE_ID"],
+           let parsed = UUID(uuidString: raw) {
+            return parsed
+        }
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "PyrxWorkspaceId") as? String,
            let parsed = UUID(uuidString: raw) {
             return parsed
         }
         return UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
     }
 
-    /// Replace with your real `psk_live_…` / `psk_test_…` API key before
-    /// running against a live PYRX deployment. Reads from `PYRX_API_KEY`
-    /// env var when set.
     static var apiKey: String {
         if let raw = ProcessInfo.processInfo.environment["PYRX_API_KEY"],
            !raw.isEmpty {
             return raw
         }
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "PyrxApiKey") as? String,
+           !raw.isEmpty {
+            return raw
+        }
         return "psk_live_00000000000000000000000000000000"
+    }
+
+    static var baseUrl: URL {
+        if let raw = ProcessInfo.processInfo.environment["PYRX_BASE_URL"],
+           let parsed = URL(string: raw) {
+            return parsed
+        }
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "PyrxBaseUrl") as? String,
+           let parsed = URL(string: raw) {
+            return parsed
+        }
+        return URL(string: "https://synapse-events.pyrx.tech")!
     }
 }

@@ -8,6 +8,14 @@ options:
 configs:
   Debug: debug
   Release: release
+# Apply build-time PYRX config from Config.xcconfig. The xcconfig defines
+# PYRX_WORKSPACE_ID + PYRX_API_KEY + PYRX_BASE_URL with safe production
+# defaults; an optional Config.local.xcconfig (gitignored) overrides for
+# local dev. These flow into Info.plist via the `info.properties` keys
+# below, then SwiftUIDemoApp.swift reads them at runtime.
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -55,6 +63,12 @@ targets:
           - UIInterfaceOrientationPortrait
         UIBackgroundModes:
           - remote-notification
+        # PYRX config injected at build time from Config.xcconfig (production
+        # defaults) + optional Config.local.xcconfig (dev overrides).
+        # SwiftUIDemoApp.swift reads these via Bundle.main.object(forInfoDictionaryKey:).
+        PyrxWorkspaceId: $(PYRX_WORKSPACE_ID)
+        PyrxApiKey: $(PYRX_API_KEY)
+        PyrxBaseUrl: $(PYRX_BASE_URL)
     entitlements:
       path: SwiftUIDemo/SwiftUIDemo.entitlements
       properties:

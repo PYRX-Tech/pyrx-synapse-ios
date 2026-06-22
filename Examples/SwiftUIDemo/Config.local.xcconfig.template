@@ -1,0 +1,27 @@
+//
+// Config.local.xcconfig.template
+//
+// Local dev environment overrides for the SwiftUIDemo sample app.
+//
+// HOW TO USE
+// ----------
+// 1. Copy this file to Config.local.xcconfig (same directory).
+// 2. Uncomment + fill in the values below.
+// 3. Regenerate the Xcode project:  xcodegen generate
+// 4. Build & run on a real iPhone (push delivery doesn't work on Simulator).
+//
+// Config.local.xcconfig is in .gitignore — your real credentials never
+// leave your laptop. Config.xcconfig pulls this file in via `#include?`
+// at build time; the values below override the defaults in Config.xcconfig.
+//
+// URL GOTCHA
+// ----------
+// `//` is the xcconfig comment-start marker. URLs that contain `//`
+// must escape with `$()` between the slashes:
+//     PYRX_BASE_URL = https:/$()/dev.synapse-events.pyrx.tech
+// expands to `https://dev.synapse-events.pyrx.tech` at build time.
+//
+
+// PYRX_WORKSPACE_ID = 11111111-2222-3333-4444-555555555555
+// PYRX_API_KEY = psk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// PYRX_BASE_URL = https:/$()/dev.synapse-events.pyrx.tech

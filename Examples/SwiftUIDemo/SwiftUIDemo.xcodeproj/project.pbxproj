@@ -29,6 +29,7 @@
 		B7AF320824502E238820BEA1 /* IdentityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityView.swift; sourceTree = "<group>"; };
 		CA7504057F7B5EF901CA7441 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		CB3C0CB21E4FCDC0905687AE /* SwiftUIDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIDemoApp.swift; sourceTree = "<group>"; };
+		"TEMP_BC443689-3182-4F35-8B8E-44B38DE70CD1" /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,6 +82,14 @@
 				2516AA77F25C71D90D68C3D1 /* SwiftUIDemo */,
 				630EABA5B137A98E74B7958F /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		"TEMP_3498033B-3DFE-4022-A1D4-AB323072D08A" /* SwiftUIDemo */ = {
+			isa = PBXGroup;
+			children = (
+				"TEMP_BC443689-3182-4F35-8B8E-44B38DE70CD1" /* Config.xcconfig */,
+			);
+			path = SwiftUIDemo;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -180,6 +189,7 @@
 		};
 		77131231024D546208518934 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = "TEMP_BC443689-3182-4F35-8B8E-44B38DE70CD1" /* Config.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -260,6 +270,7 @@
 		};
 		E0C8E0083CB451D9D9488898 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = "TEMP_BC443689-3182-4F35-8B8E-44B38DE70CD1" /* Config.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
