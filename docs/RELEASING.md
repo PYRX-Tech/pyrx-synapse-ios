@@ -93,10 +93,34 @@ pod lib lint PYRXSynapse.podspec
 
 ### 2. Update version metadata
 
-Bump `PYRXSynapse.podspec`:
+**Recommended:** use the bump script. One command updates all three lockstep version references AND runs `swift test` to confirm assertions still pass:
+
+```bash
+./scripts/bump-version.sh 1.0.0
+```
+
+The script updates:
+1. `PYRXSynapse.podspec` — `s.version` line
+2. `Sources/PYRXSynapse/PyrxConstants.swift` — `sdkVersion` constant
+3. `Tests/PYRXSynapseTests/PushRegistrationTests.swift` — hardcoded JSON assertion
+
+This exists because v0.1.x dry-runs caught lockstep drift (test assertions hardcoded the old version while source was bumped). Manual sed is error-prone.
+
+**Manual alternative** (if you don't want to run the script):
 
 ```ruby
-s.version = '1.0.0'   # change to the new version
+# PYRXSynapse.podspec
+s.version = '1.0.0'
+```
+
+```swift
+// Sources/PYRXSynapse/PyrxConstants.swift
+public static let sdkVersion: String = "1.0.0"
+```
+
+```swift
+// Tests/PYRXSynapseTests/PushRegistrationTests.swift  (the hardcoded "sdk_version" assertion)
+"sdk_version":"1.0.0"
 ```
 
 SPM does **not** read a version from `Package.swift` — it uses the git tag directly. There's no `Package.swift` change required for SPM versioning.
@@ -132,6 +156,7 @@ Open the Actions tab on GitHub. The `Publish` workflow runs three jobs:
 
 1. **verify** — `swift package resolve`, `swift build -c release`, `swift test`, `pod lib lint PYRXSynapse.podspec --allow-warnings`. All must pass before the next two jobs run.
 2. **publish-cocoapods** — `pod trunk push PYRXSynapse.podspec`. Gated on `vars.COCOAPODS_PUBLISH_ENABLED == 'true'` and `secrets.COCOAPODS_TRUNK_TOKEN` being set.
+   - ⚠️ **Known CocoaPods Trunk quirk**: occasionally the upload **succeeds server-side but returns HTTP 500** to the client (job marked failed in GitHub Actions). If `publish-cocoapods` fails with "An internal server error occurred. Please check for any known status issues at https://twitter.com/CocoaPods and try again later", **DO NOT immediately bump version and re-tag.** First check whether the pod actually published by running `curl -s "https://trunk.cocoapods.org/api/v1/pods/PYRXSynapse" | python3 -m json.tool | head` — if your new version appears in the `versions` array, it published successfully (the 500 was misleading). If the version is missing, then retry the job (`gh run rerun <run-id> --failed`) or wait + retry. v0.1.0 dry-run hit this exact quirk; v0.1.1+ should not happen with the same version.
 3. **github-release** — creates a GitHub Release on the tag with auto-generated release notes.
 
 If any job fails:
