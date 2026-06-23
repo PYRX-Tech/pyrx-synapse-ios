@@ -48,7 +48,7 @@ struct SwiftUIDemoApp: App {
                     config: PyrxConfig(
                         workspaceId: SwiftUIDemoApp.workspaceId,
                         apiKey: SwiftUIDemoApp.apiKey,
-                        environment: .production,
+                        environment: .sandbox,
                         baseUrl: SwiftUIDemoApp.baseUrl
                     )
                 )

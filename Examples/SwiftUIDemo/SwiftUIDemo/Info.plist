@@ -20,6 +20,12 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>PyrxApiKey</key>
+	<string>$(PYRX_API_KEY)</string>
+	<key>PyrxBaseUrl</key>
+	<string>$(PYRX_BASE_URL)</string>
+	<key>PyrxWorkspaceId</key>
+	<string>$(PYRX_WORKSPACE_ID)</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
