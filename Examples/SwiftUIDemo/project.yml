@@ -2,7 +2,7 @@ name: SwiftUIDemo
 options:
   bundleIdPrefix: tech.pyrx.synapse
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "17.0"
   developmentLanguage: en
   createIntermediateGroups: true
 configs:
@@ -19,16 +19,37 @@ configFiles:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     CODE_SIGN_STYLE: Automatic
-    # Allow `xcodebuild build -destination 'generic/platform=iOS Simulator'`
-    # without a paid Apple Developer Team in CI / unsigned local builds.
-    CODE_SIGNING_ALLOWED: NO
-    CODE_SIGN_IDENTITY: ""
-    DEVELOPMENT_TEAM: ""
-    PROVISIONING_PROFILE_SPECIFIER: ""
+    # CODE_SIGNING_ALLOWED, CODE_SIGN_IDENTITY, DEVELOPMENT_TEAM, and
+    # PROVISIONING_PROFILE_SPECIFIER are intentionally NOT hardcoded here.
+    # They flow from Config.xcconfig (production placeholders) and
+    # Config.local.xcconfig (gitignored, user-specific team). Real-device
+    # builds need signing on; CI Simulator builds set
+    # CODE_SIGNING_ALLOWED=NO via the xcodebuild command line
+    # (e.g. `xcodebuild build -destination 'generic/platform=iOS Simulator'
+    # CODE_SIGNING_ALLOWED=NO`).
     ENABLE_BITCODE: NO
     GENERATE_INFOPLIST_FILE: NO
+    # Xcode 16+ defaults to ENABLE_DEBUG_DYLIB=YES, which splits the app
+    # binary into a tiny `<App>` stub + a `<App>.debug.dylib` that the stub
+    # dlopens at launch. That layout is REQUIRED for in-app SwiftUI Previews
+    # of executable targets, but it routinely BREAKS standalone launches on
+    # real devices: when the app is launched outside an Xcode "Run" session
+    # (e.g. tapped from the home screen, or launched via `devicectl process
+    # launch`), the stub silently fails to load the debug dylib and the
+    # user sees a permanently black screen. The process stays alive, the
+    # UIWindowScene reports SceneReady, but @main never runs because the
+    # real `App` type lives in the unloaded dylib.
+    #
+    # We don't need this sample app to be previewable in Xcode — it's a
+    # manual-test surface, not a design canvas — so force the classic
+    # static-link layout on both Debug AND Release. Fixes the black-screen
+    # on-device launch under Xcode 16+ / 26.
+    #
+    # See: https://developer.apple.com/forums/thread/812649 and the
+    # broader Xcode 16 debug-dylib regression cluster.
+    ENABLE_DEBUG_DYLIB: NO
 packages:
   PYRXSynapse:
     # Local path to the SDK at the repo root. Xcode resolves SPM packages
