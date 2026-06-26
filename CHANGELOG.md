@@ -14,6 +14,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.1.1] - 2026-06-26
+
+### Added
+- **`PyrxConfig.sdkVariant`** — new optional initializer parameter for cross-platform wrapper SDKs (React Native, Flutter, Unity, etc.) to mark their origin in telemetry. When set, the wire-level `sdk_platform` field on `/v1/devices` becomes `"ios+<variant>"` (e.g. `"ios+rn"`); when omitted (the default), the field remains `"ios"`. The `Device.platform` field stays `"ios"` regardless — push dispatch routing (APNs vs FCM) is unaffected. Telemetry-only.
+- **`DeviceMetadata.sdkPlatform(variant:)`** — internal helper used by `PushRegistration` to compose the suffixed value. The bare-arg `DeviceMetadata.sdkPlatform()` is preserved for backward compatibility.
+
+### Changed
+- `PushRegistration` initializer accepts an optional `sdkVariant: String?` parameter so the variant can flow from `PyrxConfig` to the wire payload without re-resolving on every call.
+
+### Internal
+- New test coverage in `PyrxConfigTests` (default-nil, pass-through, whitespace trimming, empty-collapses-to-nil) and `PushRegistrationTests` (wire payload assertions for both variant-set and bare cases, `DeviceMetadata.sdkPlatform(variant:)` behavior).
+
+---
+
 ## [0.1.0] - 2026-06-21
 
 Initial public release. Ships the complete Phase 8.4a iOS SDK surface:

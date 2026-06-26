@@ -67,6 +67,26 @@ public struct PyrxConfig: Sendable, Equatable {
     /// Must be ≥ 1. Values < 1 are clamped silently inside `EventQueue`.
     public let maxQueueSize: Int
 
+    /// Optional SDK-variant marker appended to the wire-level
+    /// `sdk_platform` field on `/v1/devices` (and the
+    /// `X-PYRX-SDK-PLATFORM` header) — telemetry only, never used for
+    /// dispatch routing on the backend.
+    ///
+    /// When `nil` (the default), the SDK reports `sdk_platform = "ios"`,
+    /// matching every existing bare-iOS integration. When set, the wire
+    /// value becomes `"ios+<variant>"` — e.g. a React Native wrapper
+    /// passes `sdkVariant: "rn"` so the dashboard's Device Explorer can
+    /// distinguish a React Native install from a native install.
+    ///
+    /// Backend dispatch (APNs vs FCM) reads `Device.platform` separately
+    /// (`"ios"` / `"android"`), so this variant is invisible to push
+    /// routing — it only changes what shows up in telemetry surfaces.
+    ///
+    /// Wrappers SHOULD use a short lowercase identifier (`"rn"`,
+    /// `"flutter"`, `"unity"`). The SDK does NOT validate the value
+    /// beyond trimming whitespace.
+    public let sdkVariant: String?
+
     public static let defaultBaseUrl: URL = {
         // Force-unwrap is safe — the literal is a valid URL.
         guard let url = URL(string: "https://synapse-events.pyrx.tech") else {
@@ -81,7 +101,8 @@ public struct PyrxConfig: Sendable, Equatable {
         environment: PyrxEnvironment = .production,
         baseUrl: URL = PyrxConfig.defaultBaseUrl,
         logLevel: LogLevel = .info,
-        maxQueueSize: Int = 1000
+        maxQueueSize: Int = 1000,
+        sdkVariant: String? = nil
     ) {
         self.workspaceId = workspaceId
         self.apiKey = apiKey
@@ -89,6 +110,11 @@ public struct PyrxConfig: Sendable, Equatable {
         self.baseUrl = baseUrl
         self.logLevel = logLevel
         self.maxQueueSize = maxQueueSize
+        // Trim incidental whitespace, then collapse empty strings to nil
+        // so a misuse like `sdkVariant: ""` doesn't end up as the wire
+        // value `"ios+"` — which would be confusing in dashboards.
+        let trimmed = sdkVariant?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sdkVariant = (trimmed?.isEmpty ?? true) ? nil : trimmed
     }
 
     /// Throws `PyrxError.invalidConfig` if any required field fails validation.

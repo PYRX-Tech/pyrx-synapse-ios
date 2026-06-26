@@ -225,6 +225,7 @@ public actor Pyrx {
             storage: storage,
             httpClient: client,
             environment: config.environment.wireEnvironment,
+            sdkVariant: config.sdkVariant,
             logger: logger
         )
         self.pushHandlers = PushHandlers(

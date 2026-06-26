@@ -79,6 +79,25 @@ enum DeviceMetadata {
         PyrxConstants.platform
     }
 
+    /// SDK platform identifier with an optional wrapper-variant suffix —
+    /// e.g. `"ios"` (no variant) or `"ios+rn"` (React Native wrapper).
+    ///
+    /// The suffix is **telemetry-only**: the backend's push dispatcher
+    /// routes on `Device.platform` (`"ios"` / `"android"`), not on
+    /// `sdk_platform`, so a variant value can never break delivery.
+    /// Wrappers pass their identifier via `PyrxConfig.sdkVariant`; the
+    /// `PushRegistration` initializer threads that value through to this
+    /// helper.
+    static func sdkPlatform(variant: String?) -> String {
+        let base = PyrxConstants.platform
+        guard let variant = variant?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !variant.isEmpty
+        else {
+            return base
+        }
+        return "\(base)+\(variant)"
+    }
+
     /// Human-readable OS string, e.g. `"iOS 17.4.1"` or `"iPadOS 17.4.1"`.
     ///
     /// We deliberately prepend the platform name (iOS / iPadOS / tvOS / etc.)
