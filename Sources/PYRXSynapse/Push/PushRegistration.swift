@@ -68,16 +68,24 @@ final class PushRegistration: @unchecked Sendable {
     private let httpClient: HTTPClient
     private let logger: PyrxLogger
     private let environment: WireEnvironment
+    /// Optional wrapper-variant marker (e.g. `"rn"`) appended to the wire
+    /// `sdk_platform` field as `"ios+<variant>"`. Telemetry-only; never
+    /// influences dispatch routing. Threaded from `PyrxConfig.sdkVariant`
+    /// at construction time so the variant doesn't have to be re-resolved
+    /// on every registration.
+    private let sdkVariant: String?
 
     init(
         storage: PyrxStorage,
         httpClient: HTTPClient,
         environment: WireEnvironment,
+        sdkVariant: String? = nil,
         logger: PyrxLogger = .shared
     ) {
         self.storage = storage
         self.httpClient = httpClient
         self.environment = environment
+        self.sdkVariant = sdkVariant
         self.logger = logger
     }
 
@@ -124,7 +132,7 @@ final class PushRegistration: @unchecked Sendable {
             bundleId: DeviceMetadata.bundleId(),
             appVersion: DeviceMetadata.appVersion(),
             sdkVersion: DeviceMetadata.sdkVersion(),
-            sdkPlatform: DeviceMetadata.sdkPlatform(),
+            sdkPlatform: DeviceMetadata.sdkPlatform(variant: sdkVariant),
             osVersion: DeviceMetadata.osVersion(),
             deviceModel: DeviceMetadata.deviceModel(),
             locale: DeviceMetadata.locale(),

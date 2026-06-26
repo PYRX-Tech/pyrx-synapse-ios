@@ -70,12 +70,16 @@ final class PushRegistrationTests: XCTestCase {
         return Bench(pyrx: pyrx, storage: storage, session: session)
     }
 
-    private func makeConfig(environment: PyrxEnvironment = .production) -> PyrxConfig {
+    private func makeConfig(
+        environment: PyrxEnvironment = .production,
+        sdkVariant: String? = nil
+    ) -> PyrxConfig {
         PyrxConfig(
             workspaceId: workspaceId,
             apiKey: apiKey,
             environment: environment,
-            baseUrl: URL(string: "https://synapse-events.pyrx.tech")!
+            baseUrl: URL(string: "https://synapse-events.pyrx.tech")!,
+            sdkVariant: sdkVariant
         )
     }
 
@@ -90,7 +94,7 @@ final class PushRegistrationTests: XCTestCase {
         {
           "id":"\(id)","contact_id":"\(contactId)","platform":"\(platform)",
           "push_token":"\(pushToken)","bundle_id":"tech.pyrx.crm.ios",
-          "app_version":"1.0","sdk_version":"0.1.0","sdk_platform":"ios",
+          "app_version":"1.0","sdk_version":"0.1.1","sdk_platform":"ios",
           "os_version":"iOS 17.0","device_model":"iPhone15,3","locale":"en_US",
           "timezone":"UTC","environment":"live","push_enabled":true,
           "last_seen_at":"2026-06-21T10:00:00.000Z",
@@ -301,5 +305,62 @@ final class PushRegistrationTests: XCTestCase {
         XCTAssertFalse(DeviceMetadata.deviceModel().isEmpty)
         XCTAssertFalse(DeviceMetadata.locale().isEmpty)
         XCTAssertFalse(DeviceMetadata.timezone().isEmpty)
+    }
+
+    // MARK: - DeviceMetadata.sdkPlatform(variant:)
+
+    func test_deviceMetadata_sdkPlatformVariant_nilReturnsBareIos() {
+        XCTAssertEqual(DeviceMetadata.sdkPlatform(variant: nil), "ios")
+    }
+
+    func test_deviceMetadata_sdkPlatformVariant_appendsSuffix() {
+        // The wrapper-variant convention: "ios+<variant>".
+        XCTAssertEqual(DeviceMetadata.sdkPlatform(variant: "rn"), "ios+rn")
+        XCTAssertEqual(DeviceMetadata.sdkPlatform(variant: "flutter"), "ios+flutter")
+    }
+
+    func test_deviceMetadata_sdkPlatformVariant_trimsWhitespace() {
+        XCTAssertEqual(DeviceMetadata.sdkPlatform(variant: "  rn  "), "ios+rn")
+    }
+
+    func test_deviceMetadata_sdkPlatformVariant_emptyOrBlankFallsBackToBare() {
+        // Empty / blank should NOT produce the malformed wire value "ios+".
+        XCTAssertEqual(DeviceMetadata.sdkPlatform(variant: ""), "ios")
+        XCTAssertEqual(DeviceMetadata.sdkPlatform(variant: "   "), "ios")
+    }
+
+    // MARK: - sdkVariant on the wire
+
+    func test_handleDeviceToken_withSdkVariant_sendsSuffixedSdkPlatform() async throws {
+        let bench = makeBench()
+        // Simulate the React Native wrapper passing its identifier.
+        try await bench.pyrx.initialize(config: makeConfig(sdkVariant: "rn"))
+        enqueueDeviceResponse(bench.session)
+
+        let token = Data([0xDE, 0xAD, 0xBE, 0xEF])
+        _ = try await bench.pyrx.handleDeviceToken(token)
+
+        let raw = try XCTUnwrap(bench.session.requests.first?.body)
+        let json = try JSONSerialization.jsonObject(with: raw) as? [String: Any]
+
+        // platform stays "ios" (drives APNs dispatch); only sdk_platform
+        // carries the wrapper marker.
+        XCTAssertEqual(json?["platform"] as? String, "ios")
+        XCTAssertEqual(json?["sdk_platform"] as? String, "ios+rn")
+    }
+
+    func test_handleDeviceToken_withoutSdkVariant_sendsBareSdkPlatform() async throws {
+        // Bare-iOS regression: no variant → no suffix. Locks behavior for
+        // every existing integration that pre-dates the variant field.
+        let bench = makeBench()
+        try await bench.pyrx.initialize(config: makeConfig())
+        enqueueDeviceResponse(bench.session)
+
+        let token = Data([0x01, 0x02, 0x03, 0x04])
+        _ = try await bench.pyrx.handleDeviceToken(token)
+
+        let raw = try XCTUnwrap(bench.session.requests.first?.body)
+        let json = try JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        XCTAssertEqual(json?["sdk_platform"] as? String, "ios")
     }
 }

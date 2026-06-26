@@ -76,4 +76,42 @@ final class PyrxConfigTests: XCTestCase {
         XCTAssertLessThan(LogLevel.warning, LogLevel.error)
         XCTAssertLessThan(LogLevel.error, LogLevel.none)
     }
+
+    // MARK: - sdkVariant
+
+    func test_sdkVariant_defaultsToNil() {
+        // A bare-iOS integration never sets this — verify the default does
+        // NOT inject a wrapper marker into the wire payload.
+        let config = PyrxConfig(workspaceId: validWorkspace, apiKey: validKey)
+        XCTAssertNil(config.sdkVariant)
+    }
+
+    func test_sdkVariant_passThroughForValidValue() {
+        let config = PyrxConfig(
+            workspaceId: validWorkspace,
+            apiKey: validKey,
+            sdkVariant: "rn"
+        )
+        XCTAssertEqual(config.sdkVariant, "rn")
+    }
+
+    func test_sdkVariant_trimsIncidentalWhitespace() {
+        let config = PyrxConfig(
+            workspaceId: validWorkspace,
+            apiKey: validKey,
+            sdkVariant: "  rn  "
+        )
+        // Trimming guards against accidental wire values like "ios+ rn".
+        XCTAssertEqual(config.sdkVariant, "rn")
+    }
+
+    func test_sdkVariant_collapsesEmptyAndWhitespaceToNil() {
+        // Either of these would otherwise serialize as the malformed wire
+        // value "ios+" — collapsing to nil keeps telemetry clean.
+        let empty = PyrxConfig(workspaceId: validWorkspace, apiKey: validKey, sdkVariant: "")
+        XCTAssertNil(empty.sdkVariant)
+
+        let blanks = PyrxConfig(workspaceId: validWorkspace, apiKey: validKey, sdkVariant: "   \n\t")
+        XCTAssertNil(blanks.sdkVariant)
+    }
 }
