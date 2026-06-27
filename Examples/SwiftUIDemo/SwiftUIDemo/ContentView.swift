@@ -6,9 +6,13 @@
 import SwiftUI
 import PYRXSynapse
 
-/// Five-tab demo surface. Each tab fires a `Pyrx.shared.screen(...)` on
+/// Six-tab demo surface. Each tab fires a `Pyrx.shared.screen(...)` on
 /// appearance so the events tab visibly accumulates `$screen` events as
-/// the user moves around.
+/// the user moves around. The Observer tab demonstrates the new
+/// `Pyrx.shared.events()` AsyncStream introduced in 0.1.2.
+///
+/// On iPhone SE-class devices (compact width), iOS collapses the 6th
+/// tab into a "More" menu — acceptable for a demo.
 struct ContentView: View {
 
     @State private var selection: Tab = .identity
@@ -17,6 +21,7 @@ struct ContentView: View {
         case identity
         case events
         case push
+        case observer
         case debug
         case privacy
     }
@@ -37,6 +42,11 @@ struct ContentView: View {
                 .tabItem { Label("Push", systemImage: "bell") }
                 .tag(Tab.push)
                 .onAppear { trackScreen("push") }
+
+            ObserverDemoView()
+                .tabItem { Label("Observer", systemImage: "eye") }
+                .tag(Tab.observer)
+                .onAppear { trackScreen("observer") }
 
             DebugInfoView()
                 .tabItem { Label("Debug", systemImage: "ladybug") }

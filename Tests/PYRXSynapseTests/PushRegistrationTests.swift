@@ -94,7 +94,7 @@ final class PushRegistrationTests: XCTestCase {
         {
           "id":"\(id)","contact_id":"\(contactId)","platform":"\(platform)",
           "push_token":"\(pushToken)","bundle_id":"tech.pyrx.crm.ios",
-          "app_version":"1.0","sdk_version":"0.1.1","sdk_platform":"ios",
+          "app_version":"1.0","sdk_version":"0.1.2","sdk_platform":"ios",
           "os_version":"iOS 17.0","device_model":"iPhone15,3","locale":"en_US",
           "timezone":"UTC","environment":"live","push_enabled":true,
           "last_seen_at":"2026-06-21T10:00:00.000Z",

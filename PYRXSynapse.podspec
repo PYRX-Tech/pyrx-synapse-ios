@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'PYRXSynapse'
-  s.version          = '0.1.1'
+  s.version          = '0.1.2'
   s.summary          = 'PYRX Synapse iOS SDK — events, identity, push, privacy controls.'
   s.description      = <<-DESC
     Native iOS SDK for the PYRX Synapse customer engagement platform.

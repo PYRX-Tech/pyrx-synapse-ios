@@ -11,7 +11,7 @@ import Foundation
 
 public enum PyrxConstants {
     /// SDK semantic version. Sent on `X-PYRX-SDK-VERSION` (header wired in PR 2).
-    public static let sdkVersion: String = "0.1.1"
+    public static let sdkVersion: String = "0.1.2"
 
     /// Platform identifier. Sent on `X-PYRX-SDK-PLATFORM` (header wired in PR 2).
     /// Always `"ios"` regardless of underlying device class (iPad/iPhone/etc.).

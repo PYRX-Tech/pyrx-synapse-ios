@@ -120,6 +120,31 @@ final class PushHandlers: @unchecked Sendable {
     private let urlOpener: PushURLOpener
     private let logger: PyrxLogger
 
+    /// Phase 9.2.1 PR-1 — observer publisher hook. Called from each of
+    /// the 4 push fire-points with the corresponding `PyrxEvent`. Default
+    /// is a no-op so legacy construction sites (and the dedicated
+    /// `PushHandlersTests` standalone factory) keep working unchanged.
+    private let onObservedEvent: @Sendable (PyrxEvent) async -> Void
+
+    /// Cold-start dedup state — a single in-process window for the
+    /// (`push_log_id`, expiresAt) tuple. When `recordColdStartOpen`
+    /// publishes `.pushReceivedColdStart` we register the id with a 5s
+    /// TTL; any subsequent `recordPushReceived` or `emitOpened` /
+    /// `emitClicked` for the same id within that window suppresses
+    /// observer publication (telemetry POSTs still fire — only the
+    /// observer surface is deduped). Mutated only from the `Pyrx`
+    /// actor (where push handlers run) so a plain dictionary + NSLock
+    /// is enough.
+    private let dedupLock = NSLock()
+    private var coldStartDedup: [UUID: Date] = [:]
+
+    /// Cold-start dedup window. 5 seconds is enough to cover the OS
+    /// gap between the launch-time replay (`recordColdStartOpen`) and
+    /// the subsequent `didReceiveRemoteNotification` for the same
+    /// payload, without being so long that a legitimately-distinct
+    /// later delivery of the same campaign would be suppressed.
+    static let coldStartDedupWindow: TimeInterval = 5.0
+
     /// `pyrx`-namespace keys inside the APNs payload — pulled into a single
     /// place so renaming is grep-friendly.
     enum PayloadKey {
@@ -134,12 +159,14 @@ final class PushHandlers: @unchecked Sendable {
         httpClient: HTTPClient,
         eventsManager: EventsManager,
         urlOpener: PushURLOpener = PushHandlers.defaultURLOpener(),
-        logger: PyrxLogger = .shared
+        logger: PyrxLogger = .shared,
+        onObservedEvent: @escaping @Sendable (PyrxEvent) async -> Void = { _ in }
     ) {
         self.httpClient = httpClient
         self.eventsManager = eventsManager
         self.urlOpener = urlOpener
         self.logger = logger
+        self.onObservedEvent = onObservedEvent
     }
 
     static func defaultURLOpener() -> PushURLOpener {
@@ -285,10 +312,19 @@ final class PushHandlers: @unchecked Sendable {
     /// Internal (called by `Pyrx.recordColdStartLaunch` and the deferred
     /// replay in `initialize`).
     func recordColdStartOpen(userInfo: [AnyHashable: Any]) async {
-        guard pushLogId(from: userInfo) != nil else {
+        guard let logId = pushLogId(from: userInfo) else {
             logger.debug("recordColdStartOpen: no pyrx.push_log_id — skipping $app_opened_from_push.")
             return
         }
+        // Phase 9.2.1 PR-1 — register dedup BEFORE both the track call
+        // and the observer publication. If we publish first and the
+        // dedup registration races a parallel `didReceive` (which can
+        // arrive on the same payload within a few hundred ms on iOS
+        // cold-launches), the observer would see both
+        // `pushReceivedColdStart` and `pushReceived` for the same
+        // payload. Registering first closes that window.
+        registerColdStartDedup(logId)
+
         var attrs = pyrxAttributes(from: userInfo) ?? [:]
         // Annotate the deep link onto the attribution event so downstream
         // analytics can re-derive the click target without re-parsing
@@ -306,6 +342,11 @@ final class PushHandlers: @unchecked Sendable {
         } catch {
             logger.warning("recordColdStartOpen: track failed — \(error.localizedDescription)")
         }
+        // Phase 9.2.1 PR-1 — observer publication for the cold-start
+        // branch. Always fired (the dedup is OUTBOUND — it prevents
+        // subsequent `pushReceived` / `pushClicked` for the same id,
+        // not this initial cold-start event).
+        await publishObserver(.pushReceivedColdStart(makePushReceivedEvent(userInfo: userInfo)))
     }
 
     // MARK: - Telemetry
@@ -321,7 +362,7 @@ final class PushHandlers: @unchecked Sendable {
         // Synapse" marker. Without it, we have nothing useful to attribute
         // the open to, and firing a bare `$push_received` would skew the
         // received → opened conversion funnel.
-        guard pushLogId(from: userInfo) != nil else {
+        guard let logId = pushLogId(from: userInfo) else {
             logger.debug("recordPushReceived: no pyrx.push_log_id — skipping $push_received.")
             return false
         }
@@ -331,6 +372,20 @@ final class PushHandlers: @unchecked Sendable {
                 eventName: "$push_received",
                 properties: attrs
             )
+            // Phase 9.2.1 PR-1 — observer publication. Cold-start
+            // dedup: a cold-start replay calls `recordColdStartOpen`
+            // first; the OS may then re-deliver the same payload via
+            // `didReceiveRemoteNotification` within a few seconds.
+            // We suppress the second observer publication so apps
+            // see exactly one event per launch payload.
+            if !shouldSuppressForColdStart(logId) {
+                await publishObserver(.pushReceived(makePushReceivedEvent(userInfo: userInfo)))
+            } else {
+                logger.debug(
+                    "recordPushReceived: observer publication suppressed " +
+                    "(cold-start dedup window active for push_log_id=\(logId))"
+                )
+            }
             return true
         } catch {
             logger.warning("recordPushReceived: track failed — \(error.localizedDescription)")
@@ -364,6 +419,21 @@ final class PushHandlers: @unchecked Sendable {
         } catch {
             logger.warning("push/opened: failed — \(error.localizedDescription)")
         }
+        // Phase 9.2.1 PR-1 — observer publication. Body-tap is the
+        // `actionId == nil` shape. Skip when the same payload is in
+        // the cold-start dedup window — a cold-launched tap already
+        // emitted `pushReceivedColdStart` and there is no separate
+        // user click for the observer to react to.
+        if !shouldSuppressForColdStart(pushLogId) {
+            await publishObserver(.pushClicked(
+                makePushClickedEvent(userInfo: userInfo, actionId: nil)
+            ))
+        } else {
+            logger.debug(
+                "emitOpened: observer publication suppressed " +
+                "(cold-start dedup window active for push_log_id=\(pushLogId))"
+            )
+        }
     }
 
     /// Fire `/v1/push/click` carrying the actionIdentifier as the
@@ -394,6 +464,19 @@ final class PushHandlers: @unchecked Sendable {
             logger.info("push/click: status=\(response.status.rawValue) action=\(actionId)")
         } catch {
             logger.warning("push/click: failed — \(error.localizedDescription)")
+        }
+        // Phase 9.2.1 PR-1 — observer publication. Custom action carries
+        // its identifier verbatim. Cold-start dedup matches
+        // `emitOpened` semantics.
+        if !shouldSuppressForColdStart(pushLogId) {
+            await publishObserver(.pushClicked(
+                makePushClickedEvent(userInfo: userInfo, actionId: actionId)
+            ))
+        } else {
+            logger.debug(
+                "emitClicked: observer publication suppressed " +
+                "(cold-start dedup window active for push_log_id=\(pushLogId))"
+            )
         }
     }
 
@@ -525,6 +608,113 @@ final class PushHandlers: @unchecked Sendable {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: Date())
+    }
+
+    // MARK: - APNs alert parsing (Phase 9.2.1 PR-1)
+
+    /// Parse the APNs `aps.alert` block into a (title, body) tuple for
+    /// the observer payload.
+    ///
+    /// Apple supports two shapes:
+    ///   * `aps.alert = "<string>"`              (legacy "simple alert")
+    ///                                            → title="", body="<string>"
+    ///   * `aps.alert = { title, body, … }`      (modern dict form)
+    ///                                            → extract each field
+    ///
+    /// Silent / data-only pushes carry no `aps.alert` — we return
+    /// `("", "")` so observers see consistent (never-nil) string
+    /// fields. The `subtitle` field is intentionally NOT exposed
+    /// today (no consumer needs it; can be added without breaking
+    /// the existing `PushReceivedEvent` shape).
+    static func parseAlert(_ userInfo: [AnyHashable: Any]) -> (title: String, body: String) {
+        guard
+            let aps = userInfo["aps"] as? [String: Any],
+            let alert = aps["alert"]
+        else { return ("", "") }
+
+        if let string = alert as? String {
+            return ("", string)
+        }
+        if let dict = alert as? [String: Any] {
+            let title = dict["title"] as? String ?? ""
+            let body = dict["body"] as? String ?? ""
+            return (title, body)
+        }
+        return ("", "")
+    }
+
+    // MARK: - Observer plumbing (Phase 9.2.1 PR-1)
+
+    /// Build the `PushReceivedEvent` payload from a raw APNs userInfo.
+    /// Single source of truth so the `recordPushReceived` (foreground +
+    /// background) and `recordColdStartOpen` paths produce identical
+    /// shapes for the same payload.
+    func makePushReceivedEvent(userInfo: [AnyHashable: Any]) -> PushReceivedEvent {
+        let (title, body) = Self.parseAlert(userInfo)
+        return PushReceivedEvent(
+            title: title,
+            body: body,
+            pyrxAttributes: pyrxAttributes(from: userInfo),
+            userInfo: userInfo,
+            pushLogId: pushLogId(from: userInfo),
+            receivedAt: Date()
+        )
+    }
+
+    /// Build the `PushClickedEvent` payload from a raw APNs userInfo +
+    /// the OS-supplied actionIdentifier. `body`-tap is represented as
+    /// `actionId == nil`; custom actions carry their identifier verbatim.
+    func makePushClickedEvent(
+        userInfo: [AnyHashable: Any],
+        actionId: String?
+    ) -> PushClickedEvent {
+        // Mirror the deep-link resolution path used by routeDeepLink:
+        // custom-action override key first, then campaign-level default.
+        let overrideKey = actionId.map { "\($0)_url" }
+        return PushClickedEvent(
+            actionId: actionId,
+            deepLink: deepLink(from: userInfo, overrideKey: overrideKey),
+            pushLogId: pushLogId(from: userInfo),
+            pyrxAttributes: pyrxAttributes(from: userInfo),
+            clickedAt: Date()
+        )
+    }
+
+    /// Register a `push_log_id` in the cold-start dedup window. Called
+    /// right before publishing `pushReceivedColdStart`.
+    func registerColdStartDedup(_ id: UUID) {
+        let expiresAt = Date().addingTimeInterval(Self.coldStartDedupWindow)
+        dedupLock.lock()
+        defer { dedupLock.unlock() }
+        coldStartDedup[id] = expiresAt
+        // Garbage-collect expired entries — keeps the dict bounded
+        // without a separate timer. Push deliveries are rare events;
+        // doing the sweep inline is cheaper than scheduling a sweeper.
+        let now = Date()
+        coldStartDedup = coldStartDedup.filter { $0.value > now }
+    }
+
+    /// Returns true if `id` is in the cold-start dedup window and
+    /// observer publication for this id should be suppressed. Always
+    /// returns false for `nil` (legacy pushes can never collide with
+    /// a cold-start replay because cold-start replay requires the
+    /// `pyrx.push_log_id` to be present).
+    func shouldSuppressForColdStart(_ id: UUID?) -> Bool {
+        guard let id else { return false }
+        dedupLock.lock()
+        defer { dedupLock.unlock() }
+        guard let expiresAt = coldStartDedup[id] else { return false }
+        if expiresAt <= Date() {
+            coldStartDedup.removeValue(forKey: id)
+            return false
+        }
+        return true
+    }
+
+    /// Fire-and-forget the observer hook with `event`. Wraps the
+    /// closure to keep call sites at the fire-points minimal.
+    func publishObserver(_ event: PyrxEvent) async {
+        await onObservedEvent(event)
     }
 }
 
