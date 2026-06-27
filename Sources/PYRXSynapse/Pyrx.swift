@@ -103,6 +103,19 @@ public actor Pyrx {
     /// (`setTrackingEnabled`) + GDPR delete cascade + ATT awareness. (PR 5)
     private var privacyManager: PrivacyManager?
 
+    /// Observer registry — Phase 9.2.1 PR-1. Constructed eagerly (not
+    /// lazily) so observers added BEFORE `initialize` completes still
+    /// receive events emitted during the initialize sequence (e.g. the
+    /// cold-start `pushReceivedColdStart` published from
+    /// `recordColdStartOpen` during the deferred replay).
+    ///
+    /// `nonisolated` because the field is a `let`-immutable reference
+    /// to an actor (the registry has its own isolation domain) — there
+    /// is no actor-isolated state to protect on the `Pyrx` side, and
+    /// exposing the property for callers (and tests) lets them hop
+    /// onto the registry actor directly without an extra accessor.
+    nonisolated let observerRegistry: PyrxObserverRegistry = PyrxObserverRegistry()
+
     /// Pending `launchOptions[.remoteNotification]` payload — captured by
     /// `recordColdStartLaunch(_:)` and consumed by `initialize(config:)`.
     /// Lets apps invoke the cold-start hook BEFORE the SDK is ready
@@ -202,12 +215,21 @@ public actor Pyrx {
         // SDK still functions, but offline durability is lost).
         let store: QueueFileStore = resolveQueueStore()
 
+        // Phase 9.2.1 PR-1 — capture the observer registry for the
+        // queue's drain-complete hook. The closure is `@Sendable` and
+        // does not capture `self` (the Pyrx actor) to avoid creating a
+        // strong reference cycle between the actor and the queue it
+        // owns.
+        let registry = self.observerRegistry
         let queue = EventQueue(
             httpClient: client,
             store: store,
             maxQueueSize: config.maxQueueSize,
             logger: logger,
-            clock: queueClockOverride ?? SystemClock()
+            clock: queueClockOverride ?? SystemClock(),
+            onDrainComplete: { count in
+                await registry.publish(.queueDrained(count: count))
+            }
         )
         self.eventQueue = queue
         let manager = EventsManager(
@@ -232,7 +254,13 @@ public actor Pyrx {
             httpClient: client,
             eventsManager: manager,
             urlOpener: urlOpenerOverride ?? PushHandlers.defaultURLOpener(),
-            logger: logger
+            logger: logger,
+            // Phase 9.2.1 PR-1 — observer publisher hook. Captures
+            // `registry` (not `self`) so the PushHandlers' lifetime
+            // doesn't anchor the Pyrx actor.
+            onObservedEvent: { event in
+                await registry.publish(event)
+            }
         )
 
         // PR 5 — privacy manager. Owns the kill switch, GDPR delete, ATT
@@ -297,7 +325,16 @@ public actor Pyrx {
         traits: [String: JSONValue]? = nil
     ) async throws -> IdentityResult {
         guard let manager = identityManager else { throw PyrxError.notInitialized }
-        return try await manager.identify(externalId: externalId, traits: traits)
+        // Phase 9.2.1 PR-1 — observer-side identity snapshot. Capture
+        // before AND after the manager call so observers receive a
+        // complete state transition. The publish fires only after the
+        // network call succeeds — a failed identify must not produce
+        // a misleading observer event.
+        let before = currentIdentitySnapshot()
+        let result = try await manager.identify(externalId: externalId, traits: traits)
+        let after = currentIdentitySnapshot()
+        await observerRegistry.publish(.identityChanged(before: before, after: after))
+        return result
     }
 
     /// Explicitly merge an anonymous session into a known contact.
@@ -308,7 +345,14 @@ public actor Pyrx {
     @discardableResult
     public func alias(newExternalId: String) async throws -> IdentityResult {
         guard let manager = identityManager else { throw PyrxError.notInitialized }
-        return try await manager.alias(newExternalId: newExternalId)
+        // Phase 9.2.1 PR-1 — observer snapshot pair around the
+        // server-acknowledged alias mutation. See `identify` for the
+        // rationale on publishing AFTER success only.
+        let before = currentIdentitySnapshot()
+        let result = try await manager.alias(newExternalId: newExternalId)
+        let after = currentIdentitySnapshot()
+        await observerRegistry.publish(.identityChanged(before: before, after: after))
+        return result
     }
 
     /// Client-side identity clear. Does NOT call the server.
@@ -321,7 +365,16 @@ public actor Pyrx {
     ///     server will re-attribute it to the next identify call).
     public func logout() async throws {
         guard let manager = identityManager else { throw PyrxError.notInitialized }
+        // Phase 9.2.1 PR-1 — observer snapshot pair around the local
+        // identity clear. `logout` is purely client-side so there is
+        // no server failure to gate on; we still snapshot before/after
+        // so the observer payload reflects the actual transition (and
+        // is a no-op publication if `before == after` is already-true,
+        // though in practice the storage delete always changes shape).
+        let before = currentIdentitySnapshot()
         try await manager.logout()
+        let after = currentIdentitySnapshot()
+        await observerRegistry.publish(.identityChanged(before: before, after: after))
     }
 
     // MARK: - Events API (PR 3)
@@ -635,6 +688,13 @@ public actor Pyrx {
         await eventQueue?.drainNow()
     }
 
+    /// Test-only — surface the actor-private `pushHandlers` to the
+    /// observer fire-point tests so they can drive the same code path
+    /// the public `handle*` methods take, without instantiating
+    /// `UNNotification` / `UNNotificationResponse` (which have no
+    /// public initialiser). Internal scope.
+    var _pushHandlersForTests: PushHandlers? { pushHandlers }
+
     /// Snapshot of the SDK's internal state. Useful for debug menus and
     /// support bundles.
     ///
@@ -726,6 +786,27 @@ public actor Pyrx {
                 .appendingPathComponent("event_queue.jsonl")
             return FileSystemQueueStore(fileURL: tmp)
         }
+    }
+
+    /// Snapshot the current identity state from disk. Used by the
+    /// observer fire-points to publish before/after pairs around
+    /// identify / alias / logout. Reads through the same storage seam
+    /// as the manager — no risk of drift between the snapshot and
+    /// what the manager just persisted.
+    ///
+    /// Storage `get` calls are `throws`; failures are swallowed to
+    /// `nil` here because a Keychain read failure during observer
+    /// publication should not crash the SDK — the observer event
+    /// would just look like an anonymous session, which is the safe
+    /// fallback.
+    func currentIdentitySnapshot() -> IdentitySnapshot {
+        let anon = (try? storage.get(.anonymousId)) ?? anonymousId
+        let external = (try? storage.get(.externalId))
+        return IdentitySnapshot(
+            anonymousId: anon,
+            externalId: external,
+            snapshotAt: Date()
+        )
     }
 
     /// Returns the persisted anonymousId, generating + persisting a fresh

@@ -14,6 +14,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.1.2] - 2026-06-27
+
+### Added
+
+- **`feat(observer): public observer API for SDK events`** — first PUBLIC streaming surface on `Pyrx`. Native iOS apps can now subscribe to a closed taxonomy of SDK events (`PyrxEvent`) without re-implementing `UNUserNotificationCenter` delegation or polling SDK state. Five event cases:
+  - `.pushReceived(PushReceivedEvent)` — foreground or background delivery
+  - `.pushClicked(PushClickedEvent)` — body tap or custom action button tap (NOT cold-start)
+  - `.pushReceivedColdStart(PushReceivedEvent)` — app launched from terminated state via notification tap
+  - `.queueDrained(count: Int)` — event queue successfully flushed N events (`count > 0` only)
+  - `.identityChanged(before: IdentitySnapshot, after: IdentitySnapshot)` — `identify` / `alias` / `logout` completed
+- **`Pyrx.shared.observe(on:_:) -> PyrxObserverToken`** — closure-based observer registration. Multi-subscriber by design; tokens are independent. The closure runs on the queue passed as `on:` (defaults to `.main`).
+- **`Pyrx.shared.events() -> AsyncStream<PyrxEvent>`** — AsyncStream sugar for Swift Concurrency-first callers. Each call returns a fresh stream; cancelling the consuming `Task` cancels the underlying token.
+- **`PyrxObserverToken`** — opaque reference-type handle. Holding the token keeps the subscription alive; `cancel()` (or letting the token deinit) removes it. Matches `AnyCancellable`'s contract.
+- **`PyrxAttributeValue`** — typealias for the existing public `JSONValue`. Gives observer-API consumers a PYRX-prefixed name in event payloads without breaking existing `Pyrx.shared.identify(traits: [String: JSONValue])` callers.
+- **`IdentitySnapshot`** — `(anonymousId: String?, externalId: String?, snapshotAt: Date)`. Built from `PyrxStorage` reads immediately before and after each identity mutation. Both `before` and `after` are non-optional on `.identityChanged` because anonymous-user IS a state.
+- **Replay buffer of 4** — late subscribers receive the most-recent 4 events published before they subscribed (covers the cold-start race window when consumers subscribe ~1-2s after launch).
+- **Cold-start dedup** — when iOS delivers a notification tap via BOTH `launchOptions[.remoteNotification]` AND `userNotificationCenter(_:didReceive:)`, the publisher dedups by `push_log_id` within a 5-second window so `.pushReceivedColdStart` fires exactly once AND `.pushClicked` does NOT fire for the cold-start payload.
+- `Examples/SwiftUIDemo/SwiftUIDemo/ObserverDemoView.swift` — sample-app screen demonstrating the observer API via SwiftUI's `.task` modifier. Added as the 6th tab in the demo's `TabView`.
+- `docs/observers.md` — API reference covering subscription, lifecycle, the `PyrxEvent` taxonomy, cold-start dedup, replay buffer, `PyrxAttributeValue` pattern-matching, forward-compatibility, and error semantics.
+
+### Internal
+
+- New observer fire-points in `PushHandlers.swift` (`recordPushReceived`, `emitOpened`, `emitClicked`, `recordColdStartOpen`), `IdentityManager.swift` (`identify`, `alias`, `logout`), and `EventQueue.swift::drainLoop` (queue-drain success path).
+- New `parseAlert` helper in `PushHandlers.swift` extracts `(title, body)` from `userInfo["aps"]["alert"]`, supporting both string and dict alert shapes per APNs.
+- `EventQueue.init` accepts an optional `onDrainComplete: @Sendable (Int) async -> Void` callback for cross-actor publish (default is no-op so existing tests don't break).
+- 30+ new XCTest cases in `Tests/PYRXSynapseTests/Observer/` covering observer registry semantics, AsyncStream cancellation cascade, all 5 fire-points, identity-event before/after invariants, and the cold-start dedup contract.
+
+### Forward-compatibility
+
+`PyrxEvent` is non-`@frozen` for source consumers (SPM, CocoaPods). Adding cases in future minor versions is source-compatible — your `switch` statements continue to compile, with a warning that you should handle the new case.
+
+For binary consumers (xcframework distribution — not currently shipped, may land at 1.0), the enum is treated as `@frozen`. To stay forward-compatible in that distribution mode, include `@unknown default: break` in every `switch` over `PyrxEvent`. See `docs/observers.md` for the full note.
+
+---
+
 ## [0.1.1] - 2026-06-26
 
 ### Added

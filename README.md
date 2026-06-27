@@ -80,11 +80,30 @@ struct MyApp: App {
 
 The APNs device token is delivered through `UIApplicationDelegate`. See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full AppDelegate adapter pattern and [docs/PUSH_SETUP.md](docs/PUSH_SETUP.md) for end-to-end push provisioning.
 
+## What's new in 0.1.2
+
+🆕 **Observer API** — subscribe to a closed taxonomy of SDK events (`PyrxEvent`) without re-implementing `UNUserNotificationCenter` delegation:
+
+```swift
+let stream = await Pyrx.shared.events()
+for await event in stream {
+    switch event {
+    case .pushReceived(let push): showToast(push.title, push.body)
+    case .pushClicked(let click): Router.navigate(click.deepLink)
+    case .identityChanged(let before, let after): /* ... */
+    /* ... + .pushReceivedColdStart, .queueDrained */
+    }
+}
+```
+
+Closure-based `Pyrx.shared.observe(on:_:) -> PyrxObserverToken` is also available. Multi-subscriber; cold-start dedup; 4-event replay buffer for late subscribers. Full guide: [docs/observers.md](docs/observers.md).
+
 ## Features
 
 - **Identity** — `identify`, `alias`, `logout` with anonymous-to-known merge, server-side event/device re-attribution, and Keychain-backed identifier persistence.
 - **Events** — `track` and `screen` with a durable on-disk JSONL offline queue, exponential-backoff retry on 5xx/transport failures, FIFO eviction at the configured cap (1000 default), drop-on-4xx semantics.
 - **Push notifications** — permission request, APNs token registration to `/v1/devices`, foreground presentation, background silent delivery, tap/action/dismiss telemetry, cold-start attribution, deep-link routing.
+- **Observers** (0.1.2+) — `Pyrx.shared.observe { event in ... }` or `for await event in Pyrx.shared.events()` to react to SDK events as they happen. See [docs/observers.md](docs/observers.md).
 - **Privacy controls** — tracking kill switch (`setTrackingEnabled`), GDPR cascade delete (`deleteUser`), App Tracking Transparency status readout.
 - **Diagnostics** — `debugInfo()` snapshot with SDK version, queue depth, last drain timestamp, device-token fingerprint (never the full token), and configuration echo for support cases.
 - **Thread safety** — public surface is a Swift `actor`. Call from any task on any thread.
@@ -96,6 +115,7 @@ The APNs device token is delivered through `UIApplicationDelegate`. See [docs/QU
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Five-minute setup walkthrough — Xcode → SDK → identify → track → push |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | Every public type and method, with usage examples |
 | [docs/PUSH_SETUP.md](docs/PUSH_SETUP.md) | Apple Developer Program → APNs Auth Key → PYRX dashboard → app capability |
+| [docs/observers.md](docs/observers.md) | (0.1.2+) Subscribe to SDK events via closure or AsyncStream — push, taps, cold-start, identity, queue drains |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Migration notes between SDK versions |
 | [docs/RELEASING.md](docs/RELEASING.md) | Release process for SDK maintainers |
 | [CHANGELOG.md](CHANGELOG.md) | Per-version release notes |

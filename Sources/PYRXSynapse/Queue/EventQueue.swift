@@ -161,6 +161,14 @@ actor EventQueue {
     private let clock: QueueClock
     private let maxQueueSize: Int
 
+    /// Drain-complete observer hook (Phase 9.2.1 PR-1). Called at the end
+    /// of every drain pass that sent at least one event successfully —
+    /// the count is the number of events drained in that pass. Used by
+    /// the observer registry to publish `PyrxEvent.queueDrained(count:)`.
+    /// Defaults to a no-op so legacy construction sites (and tests that
+    /// don't care about the hook) keep working unchanged.
+    private let onDrainComplete: @Sendable (Int) async -> Void
+
     // MARK: - State
 
     /// In-memory mirror of the on-disk queue. Loaded lazily on first use.
@@ -224,13 +232,15 @@ actor EventQueue {
         store: QueueFileStore,
         maxQueueSize: Int,
         logger: PyrxLogger = .shared,
-        clock: QueueClock = SystemClock()
+        clock: QueueClock = SystemClock(),
+        onDrainComplete: @escaping @Sendable (Int) async -> Void = { _ in }
     ) {
         self.httpClient = httpClient
         self.store = store
         self.maxQueueSize = max(1, maxQueueSize) // refuse zero — that disables queueing entirely
         self.logger = logger
         self.clock = clock
+        self.onDrainComplete = onDrainComplete
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -381,6 +391,11 @@ actor EventQueue {
 
         var iterations = 0
         var retriesThisPass = 0
+        // Phase 9.2.1 PR-1 — count successful drains so the observer
+        // registry can publish `queueDrained(count:)`. Counted in a local
+        // var (not actor state) because every exit path needs to fire it
+        // exactly once.
+        var drainedThisPass = 0
 
         while !events.isEmpty, iterations < Self.maxPerDrain {
             iterations += 1
@@ -394,6 +409,7 @@ actor EventQueue {
                 try? persist()
                 consecutiveFailures = 0
                 retriesThisPass = 0 // network recovered — reset per-pass cap
+                drainedThisPass += 1
 
             case .dropMalformed(let statusCode):
                 events.removeFirst()
@@ -420,6 +436,7 @@ actor EventQueue {
                         "EventQueue drain paused — \(retriesThisPass) retries this pass exhausted; " +
                         "remaining=\(events.count)"
                     )
+                    await notifyDrainComplete(count: drainedThisPass)
                     return
                 }
 
@@ -435,6 +452,7 @@ actor EventQueue {
                 } catch {
                     // Task was cancelled (e.g., SDK teardown). Exit cleanly
                     // — the events remain on disk for the next drain.
+                    await notifyDrainComplete(count: drainedThisPass)
                     return
                 }
             }
@@ -445,6 +463,15 @@ actor EventQueue {
         } else {
             logger.debug("EventQueue drain paused — \(events.count) event(s) remaining")
         }
+        await notifyDrainComplete(count: drainedThisPass)
+    }
+
+    /// Fire the drain-complete observer hook with the number of events
+    /// drained in the pass that just ended. Skipped when `count == 0`
+    /// (zero-drain passes are noise — observers should not see them).
+    private func notifyDrainComplete(count: Int) async {
+        guard count > 0 else { return }
+        await onDrainComplete(count)
     }
 
     /// Result of attempting one event POST.
