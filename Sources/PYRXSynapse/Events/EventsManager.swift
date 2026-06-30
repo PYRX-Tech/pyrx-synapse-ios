@@ -55,16 +55,24 @@ final class EventsManager: @unchecked Sendable {
     /// are expensive to construct.
     private let isoFormatter: ISO8601DateFormatter
 
+    /// Phase 10 PR-2b — optional hook fired AFTER each successful
+    /// `track` enqueue. Lets the in-app manager honor lifecycle rule
+    /// 3 (track-call refresh within max-age window short-circuits).
+    /// Fire-and-forget; never blocks the track call.
+    private let onTrackEnqueued: (@Sendable () async -> Void)?
+
     init(
         queue: EventQueue,
         storage: PyrxStorage,
         anonymousId: String,
-        logger: PyrxLogger = .shared
+        logger: PyrxLogger = .shared,
+        onTrackEnqueued: (@Sendable () async -> Void)? = nil
     ) {
         self.queue = queue
         self.storage = storage
         self.anonymousId = anonymousId
         self.logger = logger
+        self.onTrackEnqueued = onTrackEnqueued
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -92,6 +100,14 @@ final class EventsManager: @unchecked Sendable {
         )
         try await queue.enqueue(event)
         logger.debug("track enqueued — event=\(trimmed) externalId=\(event.externalId)")
+
+        // Phase 10 PR-2b — fire the optional in-app refresh hook.
+        // The hook itself is identity-gated + cache-windowed inside
+        // `InAppManager.notifyTracked`, so this is safe to call on
+        // every track without flooding /v1/in-app/poll.
+        if let hook = onTrackEnqueued {
+            Task { await hook() }
+        }
     }
 
     // MARK: - screen

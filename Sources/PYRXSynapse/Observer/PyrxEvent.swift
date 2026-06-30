@@ -4,16 +4,22 @@
 //
 //  Phase 9.2.1 PR-1 — Observer API.
 //
-//  The closed taxonomy of events the SDK publishes to observers. Five
+//  The closed taxonomy of events the SDK publishes to observers. Seven
 //  cases — every SDK lifecycle moment an app might want to react to:
 //
-//    * `.pushReceived`           — foreground or background delivery
-//    * `.pushClicked`            — body tap or custom action tap
-//    * `.pushReceivedColdStart`  — push that launched the app from
-//                                  terminated state
-//    * `.queueDrained`           — the event queue successfully drained
-//                                  N events to the wire (N > 0 only)
-//    * `.identityChanged`        — identify / alias / logout completed
+//    * `.pushReceived`              — foreground or background delivery
+//    * `.pushClicked`               — body tap or custom action tap
+//    * `.pushReceivedColdStart`     — push that launched the app from
+//                                     terminated state
+//    * `.queueDrained`              — the event queue successfully drained
+//                                     N events to the wire (N > 0 only)
+//    * `.identityChanged`           — identify / alias / logout completed
+//    * `.inAppMessageReceived`      — Phase 10 PR-2b. A new eligible
+//                                     in-app message was fetched and
+//                                     surfaced to a placement.
+//    * `.inAppMessageDismissed`     — Phase 10 PR-2b. An in-app message
+//                                     was dismissed (host-initiated or
+//                                     future expiry-driven auto-dismiss).
 //
 //  Forward-compatibility
 //  =====================
@@ -84,4 +90,29 @@ public enum PyrxEvent: Sendable {
     /// `before.externalId != after.externalId` (the publisher only
     /// fires when something actually changed).
     case identityChanged(before: IdentitySnapshot, after: IdentitySnapshot)
+
+    /// Phase 10 PR-2b — a new eligible in-app message was fetched
+    /// and surfaced to one of the registered placements. Fires once
+    /// per assignment id (deduped against the active cache); does NOT
+    /// re-fire on subsequent polls that return the same message.
+    ///
+    /// Symmetric with the browser SDK's `inAppMessageReceived`
+    /// observer event per ADR-0009 D5.
+    ///
+    /// Fired BEFORE the per-placement render callback runs so
+    /// analytics middleware can hook the message before the host app
+    /// draws.
+    case inAppMessageReceived(InAppMessage)
+
+    /// Phase 10 PR-2b — an in-app message was dismissed. Fired once
+    /// per `Synapse.InApp.dismiss` call (host-initiated). Reserved
+    /// for forward-compat with future expiry-driven auto-dismiss.
+    ///
+    /// `reason` is the host-supplied free-form string (e.g.
+    /// `"user_dismissed"`, `"cta_dismissed"`, `"expired"`). It is
+    /// NOT crossed to the backend today — the PR-1 `/v1/in-app/log`
+    /// schema does not carry it — but observers receive it for
+    /// analytics. Symmetric with the browser SDK's
+    /// `inAppMessageDismissed` observer event per ADR-0009 D5.
+    case inAppMessageDismissed(messageId: String, reason: String?)
 }

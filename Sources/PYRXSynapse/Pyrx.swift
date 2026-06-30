@@ -53,8 +53,11 @@ public actor Pyrx {
     // MARK: - State
 
     private var config: PyrxConfig?
-    private let storage: PyrxStorage
-    private let logger: PyrxLogger
+    // `internal` so the `Pyrx+InApp.swift` extension (Phase 10 PR-2b)
+    // can read the keychain without re-routing through a public method
+    // — same module, controlled surface, no leakage to host apps.
+    let storage: PyrxStorage
+    let logger: PyrxLogger
     private var anonymousId: String?
 
     /// Injectable transport — only the test path supplies a non-default value.
@@ -102,6 +105,13 @@ public actor Pyrx {
     /// Built during `initialize(config:)` — owns the privacy kill switch
     /// (`setTrackingEnabled`) + GDPR delete cascade + ATT awareness. (PR 5)
     private var privacyManager: PrivacyManager?
+
+    /// Built during `initialize(config:)` — owns in-app messaging
+    /// polling, cache, and telemetry. Phase 10 PR-2b. Bound to the
+    /// current identity via `rebindInAppTracker()` on every
+    /// identify / alias / logout. Accessor methods live in
+    /// `Pyrx+InApp.swift`; the public surface is `Synapse.InApp.*`.
+    var inAppManager: InAppManager?
 
     /// Observer registry — Phase 9.2.1 PR-1. Constructed eagerly (not
     /// lazily) so observers added BEFORE `initialize` completes still
@@ -232,11 +242,19 @@ public actor Pyrx {
             }
         )
         self.eventQueue = queue
+        // Phase 10 PR-2b — capture a weak-self closure that hops into
+        // the in-app manager (built shortly after) on every successful
+        // track enqueue. Lifecycle rule 3 (track-call refresh hint).
+        // `weak self` so the closure does not anchor the actor.
+        let trackHook: @Sendable () async -> Void = { [weak self] in
+            await self?.notifyInAppTracked()
+        }
         let manager = EventsManager(
             queue: queue,
             storage: storage,
             anonymousId: anon,
-            logger: logger
+            logger: logger,
+            onTrackEnqueued: trackHook
         )
         self.eventsManager = manager
 
@@ -273,6 +291,16 @@ public actor Pyrx {
             logger: logger
         )
         self.privacyManager = privacy
+
+        // Phase 10 PR-2b — in-app messaging manager. Construction is
+        // cheap (no I/O, no timer until first `Synapse.InApp.show`
+        // registers a placement). The manager publishes through the
+        // same observer registry as push/identity events — host apps
+        // observe in-app messages via `Pyrx.shared.events()` or
+        // `Pyrx.shared.observe(_:)` (no separate registration).
+        // Extracted to a helper to keep `initialize` body length
+        // under SwiftLint's ceiling.
+        await constructAndBindInAppManager(httpClient: client, registry: registry)
 
         // Apply any pre-init tracking gate choice BEFORE the first drain
         // — otherwise a user who flipped opt-out before init would see
@@ -334,6 +362,11 @@ public actor Pyrx {
         let result = try await manager.identify(externalId: externalId, traits: traits)
         let after = currentIdentitySnapshot()
         await observerRegistry.publish(.identityChanged(before: before, after: after))
+        // Phase 10 PR-2b — re-bind in-app manager so /v1/in-app/poll
+        // picks up the newly-identified contactId (lifecycle rule 2:
+        // null → identified transition triggers immediate poll IF
+        // placements are registered).
+        await rebindInAppTracker()
         return result
     }
 
@@ -352,6 +385,10 @@ public actor Pyrx {
         let result = try await manager.alias(newExternalId: newExternalId)
         let after = currentIdentitySnapshot()
         await observerRegistry.publish(.identityChanged(before: before, after: after))
+        // Phase 10 PR-2b — re-bind in-app manager (alias may change
+        // the contactId if the merge resolves to a different
+        // external id; the manager evaluates the transition itself).
+        await rebindInAppTracker()
         return result
     }
 
@@ -375,6 +412,10 @@ public actor Pyrx {
         try await manager.logout()
         let after = currentIdentitySnapshot()
         await observerRegistry.publish(.identityChanged(before: before, after: after))
+        // Phase 10 PR-2b — re-bind in-app manager. ContactId becomes
+        // nil after logout; the manager will stop scheduling polls
+        // (lifecycle rule 1) until the next identify.
+        await rebindInAppTracker()
     }
 
     // MARK: - Events API (PR 3)
@@ -807,6 +848,33 @@ public actor Pyrx {
             externalId: external,
             snapshotAt: Date()
         )
+    }
+
+    /// Phase 10 PR-2b — construct the in-app manager and bind it to
+    /// the current identity snapshot. Extracted from
+    /// `initialize(config:)` to keep that function body under the
+    /// SwiftLint ceiling.
+    private func constructAndBindInAppManager(
+        httpClient client: HTTPClient,
+        registry: PyrxObserverRegistry
+    ) async {
+        let inApp = InAppManager(
+            httpClient: client,
+            logger: logger,
+            observerPublisher: { event in
+                await registry.publish(event)
+            }
+        )
+        self.inAppManager = inApp
+
+        // Bind to the current identity snapshot BEFORE the first
+        // drain so any track-call refresh hook the queue triggers
+        // downstream has a bound tracker to consult. (Pre-identify
+        // the contactId will be nil — lifecycle rule 1 gates polling,
+        // so no /v1/in-app/poll fires until identify.)
+        let externalIdAtBoot = (try? storage.get(.externalId)).flatMap { $0 }
+        let contactIdAtBoot = (externalIdAtBoot?.isEmpty == false) ? externalIdAtBoot : nil
+        await inApp.bindTracker(BoundInAppTracker(contactId: contactIdAtBoot))
     }
 
     /// Returns the persisted anonymousId, generating + persisting a fresh
