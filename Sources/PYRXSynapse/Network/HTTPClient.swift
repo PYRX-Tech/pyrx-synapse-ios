@@ -51,6 +51,8 @@ public final class HTTPClient: @unchecked Sendable {
         case events = "/v1/events"
         case pushOpened = "/v1/push/opened"
         case pushClick = "/v1/push/click"
+        case inAppPoll = "/v1/in-app/poll"   // Phase 10 PR-2b
+        case inAppLog = "/v1/in-app/log"     // Phase 10 PR-2b
     }
 
     // MARK: - Header names (canonical wire surface)
@@ -140,6 +142,60 @@ public final class HTTPClient: @unchecked Sendable {
         let request = try buildRequest(path: path, body: body)
         let (data, response) = try await perform(request)
         try validate(response: response, data: data)
+    }
+
+    // MARK: - Public GET (Phase 10 PR-2b)
+
+    /// GET `endpoint` with optional repeatable query items and decode the
+    /// response into `R`.
+    ///
+    /// Query items are passed as `[URLQueryItem]` so callers can include
+    /// repeated keys verbatim — `/v1/in-app/poll` accepts
+    /// `placement` as a REPEATABLE param, NOT a comma-joined string
+    /// (cf. the browser SDK's `executePoll` URL composer in
+    /// `packages/sdk/src/in-app.ts:478`).
+    ///
+    /// - Throws: same error shape as `post(_:body:)`.
+    public func get<Response: Decodable>(
+        _ endpoint: Endpoint,
+        queryItems: [URLQueryItem] = [],
+        responseType: Response.Type = Response.self
+    ) async throws -> Response {
+        let request = try buildGetRequest(endpoint: endpoint, queryItems: queryItems)
+        let (data, response) = try await perform(request)
+        try validate(response: response, data: data)
+        return try decode(data: data, as: Response.self)
+    }
+
+    /// GET request construction. Internal access so unit tests can
+    /// assert URL composition (especially the repeated `placement`
+    /// param shape) without going through `perform(_:)`.
+    func buildGetRequest(
+        endpoint: Endpoint,
+        queryItems: [URLQueryItem]
+    ) throws -> URLRequest {
+        let base = config.baseUrl.appendingPathComponent(endpoint.rawValue)
+        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            throw PyrxError.network(.invalidResponse)
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw PyrxError.network(.invalidResponse)
+        }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+
+        // Required headers — identical surface to POST so the backend's
+        // auth + telemetry middleware sees the same envelope on GET.
+        request.setValue(config.workspaceId.uuidString, forHTTPHeaderField: HeaderName.workspaceId)
+        request.setValue(config.apiKey, forHTTPHeaderField: HeaderName.apiKey)
+        request.setValue(PyrxConstants.sdkVersion, forHTTPHeaderField: HeaderName.sdkVersion)
+        request.setValue(PyrxConstants.platform, forHTTPHeaderField: HeaderName.sdkPlatform)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        return request
     }
 
     // MARK: - Request construction

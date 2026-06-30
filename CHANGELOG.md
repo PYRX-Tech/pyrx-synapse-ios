@@ -14,6 +14,92 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.2.0] - 2026-06-30
+
+### Added — In-App Messaging (Phase 10 PR-2b)
+
+Cross-SDK symmetric port of the browser SDK's in-app messaging surface
+(see `pyrx.synapse` PR #218). Owns fetch lifecycle, in-memory cache,
+dismiss / impression / interaction telemetry, soft-degrade backoff, and
+identity-gated polling. SDK does NOT render — the host app's render
+callback draws the UI per [ADR-0008 D2](https://github.com/PYRX-Tech/pyrx-synapse/blob/master/docs/adr/ADR-0008-in-app-messaging-delivery-model.md).
+
+- **`Synapse.InApp.show(placement:callback:)`** — register a placement
+  render callback. Triggers an immediate poll if the SDK has been
+  identified. Returns a `Synapse.ShowToken`; hold to keep the
+  registration alive, drop or `cancel()` to unregister.
+- **`Synapse.InApp.getActive(placement:)`** — sync-style read of the
+  in-memory cache. Sorted by priority desc, then expiry asc.
+- **`Synapse.InApp.dismiss(messageId:reason:)`** — evict from cache,
+  fire `.inAppMessageDismissed` observer event, POST
+  `/v1/in-app/log` with `event="dismissed"`. `reason` is host-side
+  observer-only (NOT crossed to the wire; reserved for forward-compat
+  per ADR-0008).
+- **`Synapse.InApp.markInteracted(messageId:ctaId:)`** — POST
+  `/v1/in-app/log` with `event="interacted"` and `cta_id`. Does NOT
+  evict from cache — host decides whether interaction implies
+  dismissal.
+- **`Synapse.InApp.refresh()`** — explicit poll trigger. Coalesces
+  with any in-flight poll.
+- **Two new `PyrxEvent` cases** (cross-SDK symmetric per ADR-0009 D5):
+  - `.inAppMessageReceived(InAppMessage)` — new eligible message
+    fetched and surfaced. Fired ONCE per assignment id (deduped
+    against the active cache).
+  - `.inAppMessageDismissed(messageId:reason:)` — message dismissed.
+  Surfaced through the existing `Pyrx.shared.observe(on:_:)` /
+  `Pyrx.shared.events()` API — no separate registration surface.
+- **`InAppMessage` / `InAppCta` / `InAppCtaActionType`** — public
+  payload types. Wire shape is snake_case (matches backend
+  `InAppMessageSdkPayload`); Swift idiom is camelCase via
+  `CodingKeys`. ISO-8601 `expires_at` decodes into `Date?`.
+
+### Lifecycle guarantees (mirror PR #218's 10 binding rules)
+
+1. **Identity-gated polling** — no `/v1/in-app/poll` fires until
+   `Pyrx.shared.identify(…)` has succeeded.
+2. **Immediate poll on null→identified transition** when placements
+   are registered.
+3. **Track-call refresh hint** short-circuits within the cache
+   window (defaults to 60s).
+4. **Concurrent poll coalescing** via single in-flight guard.
+5. **Server-authoritative cache** — messages absent from the latest
+   poll response are evicted.
+6. **Dedup by assignment id** on `.inAppMessageReceived` — never
+   re-fires for the same message on subsequent polls.
+7. **Auto-`markImpression`** (POST `/v1/in-app/log` with
+   `event="impressed"`) AFTER the render callback returns. This is
+   the billable unit per ADR-0008 D4.
+8. **Soft-degrade backoff** — `soft_degraded: true` doubles polling
+   interval (60s → 120s); resets on next clean 200.
+9. **`plan_limit_reached: true`** still surfaces the message to the
+   host callback; emits a warning log.
+10. **No widget code** — data only. Zero `SwiftUI` / `UIKit` imports
+    in the in-app module by design (PYRX UI Kit is deferred to
+    Phase 10.x).
+
+### Internal
+
+- `HTTPClient.get(_:queryItems:responseType:)` — new GET method
+  supporting repeated query items (the `placement` param on
+  `/v1/in-app/poll` is repeatable, NOT comma-joined).
+- `EventsManager.onTrackEnqueued` — optional fire-and-forget hook
+  for the track-call refresh signal (lifecycle rule 3).
+- New `InAppManager` actor — Swift port of
+  `packages/sdk/src/in-app.ts` (605 LOC manager → 660 LOC actor with
+  the same 10-rule lifecycle).
+- 43 new XCTest cases mirroring the browser SDK's 41 behavior tests
+  + iOS-specific Codable + facade coverage. Full suite: 259 tests
+  passing (up from 216).
+
+### Forward-compatibility
+
+`PyrxEvent` remains non-`@frozen` for source consumers. The new
+cases compile against existing `switch` statements with a warning;
+binary consumers (xcframework distribution, not currently shipped)
+should include `@unknown default: break`. See `docs/observers.md`.
+
+---
+
 ## [0.1.2] - 2026-06-27
 
 ### Added
@@ -128,5 +214,8 @@ Initial public release. Ships the complete Phase 8.4a iOS SDK surface:
 
 ---
 
-[Unreleased]: https://github.com/PYRX-Tech/pyrx-synapse-ios/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/PYRX-Tech/pyrx-synapse-ios/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/PYRX-Tech/pyrx-synapse-ios/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/PYRX-Tech/pyrx-synapse-ios/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/PYRX-Tech/pyrx-synapse-ios/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/PYRX-Tech/pyrx-synapse-ios/releases/tag/v0.1.0
